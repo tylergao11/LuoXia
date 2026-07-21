@@ -7,62 +7,49 @@ from app.core.domain.models import Belief, GameSession, WorldEvent
 
 class VisibilityService:
     """
-    可见性 / 置灰：引擎规则，不绑具体剧情。
-
-    上帝模式布局：结构可列全；内容按「玩家应知情」点亮，否则 greyed。
-    知情来源：自身权威状态 · known_to · 玩家信念命题/关键词 · 同地公开身份
+    可见性 / 置灰：引擎只做算法。
+    敏感旗 / belief 前缀表由 WorldPack.visibility_config() 提供。
+    registry 由调用方注入，禁止 get_container。
     """
 
-    SENSITIVE_FLAG_KEYS = frozenset(
-        {
-            "allegiance",
-            "knows_treasure_lost",
-            "wants_help_but_distrusts",
-            "blood_curse_host",
-            "is_traitor",
-            "secret",
-        }
-    )
+    def __init__(self, registry: Any | None = None) -> None:
+        self.registry = registry
 
-    SENSITIVE_WORLD_FLAGS = frozenset(
-        {
-            "blood_curse_planted",
-            "fake_secret_realm_letter",
-            "secret_realm_is_trigger",
-            "blood_curse_host_unknown",
-            "letter_exposed",
-            "blood_curse_disarmed",
-            "sect_at_brink",
-            "crisis_fired",
-        }
-    )
+    def _cfg(self, session: GameSession) -> dict[str, Any]:
+        if self.registry is None:
+            return {}
+        try:
+            pack = self.registry.get(session.world_id)
+            fn = getattr(pack, "visibility_config", None)
+            if callable(fn):
+                return dict(fn() or {})
+        except Exception:
+            pass
+        return {}
 
     def player_beliefs(self, session: GameSession) -> list[Belief]:
         return list(session.beliefs.get(session.player_id(), []))
 
     def player_knows_actor_secret(self, session: GameSession, actor_id: str) -> bool:
-        """粗匹配：信念命题是否提到该角色 display_name 或 id 的敏感信息。"""
-        prof = session.profiles.get(actor_id)
-        names = {actor_id}
-        if prof:
-            names.add(prof.display_name)
-            if prof.title:
-                names.add(prof.title)
-        text = " ".join(b.proposition for b in self.player_beliefs(session))
-        # 若信念明确写到内鬼/效忠等且含人名
-        sensitive_words = ("内鬼", "玄阴", "效忠", "收买", "至宝遗失", "血阴")
-        if not any(w in text for w in sensitive_words):
-            return False
-        return any(n in text for n in names if n)
+        st = session.states.get(session.player_id())
+        if st and (st.flags or {}).get(f"knows_secret_{actor_id}"):
+            return True
+        prefixes = (f"secret_{actor_id}", f"expose_{actor_id}", f"exposed_{actor_id}")
+        for b in self.player_beliefs(session):
+            bid = b.belief_id or ""
+            if any(bid.startswith(p) for p in prefixes):
+                return True
+        return False
 
     def event_visible_to_player(self, session: GameSession, ev: WorldEvent) -> bool:
         pid = session.player_id()
         if ev.involves_player or pid in ev.known_to:
             return True
-        # 信念覆盖：命题含事件标题关键词
-        props = " ".join(b.proposition for b in self.player_beliefs(session))
-        if ev.title and ev.title in props:
-            return True
+        eid = ev.event_id or ""
+        if eid:
+            for b in self.player_beliefs(session):
+                if (b.belief_id or "").startswith(f"know_event_{eid}"):
+                    return True
         return False
 
     def mask_event(self, session: GameSession, ev: WorldEvent) -> dict[str, Any]:
@@ -86,13 +73,14 @@ class VisibilityService:
         }
 
     def actor_public_card(self, session: GameSession, actor_id: str) -> dict[str, Any]:
+        cfg = self._cfg(session)
+        sensitive_flags = frozenset(cfg.get("sensitive_flag_keys") or ())
         prof = session.profiles[actor_id]
         st = session.states[actor_id]
         pid = session.player_id()
         is_self = actor_id == pid
         same_loc = st.location == session.states[pid].location
 
-        # 公开：名、衔、是否存活、是否同地；位置在同地或自己时亮，否则灰
         loc_known = is_self or same_loc or self._belief_mentions_location(
             session, actor_id, st.location
         )
@@ -103,13 +91,12 @@ class VisibilityService:
                 continue
             if is_self:
                 flags_public[k] = v
-            elif k in self.SENSITIVE_FLAG_KEYS:
+            elif k in sensitive_flags:
                 if self.player_knows_actor_secret(session, actor_id):
                     flags_public[k] = v
                 else:
                     flags_greyed[k] = "？？？"
             else:
-                # 非敏感 flags：同地可见，否则灰
                 if same_loc:
                     flags_public[k] = v
                 else:
@@ -139,15 +126,16 @@ class VisibilityService:
         }
 
     def world_flags_view(self, session: GameSession) -> dict[str, Any]:
-        """世界旗：倒计时等可公开；阴谋向灰或仅信念点亮。"""
+        cfg = self._cfg(session)
+        public = frozenset(cfg.get("public_world_flags") or ())
+        sensitive = frozenset(cfg.get("sensitive_world_flags") or ())
         out: dict[str, Any] = {}
-        beliefs_text = " ".join(b.proposition for b in self.player_beliefs(session))
         for k, v in session.world_flags.items():
-            if k in ("xuanyin_countdown", "no_living_master"):
+            if k in public:
                 out[k] = {"value": v, "greyed": False, "label": k}
                 continue
-            if k in self.SENSITIVE_WORLD_FLAGS:
-                known = self._sensitive_world_known(k, beliefs_text)
+            if k in sensitive:
+                known = self.sensitive_world_known(k, session)
                 out[k] = {
                     "value": v if known else None,
                     "greyed": not known,
@@ -158,30 +146,31 @@ class VisibilityService:
                 out[k] = {"value": v, "greyed": False, "label": k}
         return out
 
-    def _sensitive_world_known(self, key: str, beliefs_text: str) -> bool:
-        mapping = {
-            "blood_curse_planted": ("血阴", "血咒", "护山阵"),
-            "fake_secret_realm_letter": ("假信", "密信有假", "并非机缘", "骗局"),
-            "secret_realm_is_trigger": ("引爆", "触发", "血阴咒", "开启仪式即是引爆"),
-            "blood_curse_host_unknown": ("寄宿", "咒种", "阵眼"),
-            "letter_exposed": ("假信", "密信", "伪造", "机缘的来信恐是假"),
-            "blood_curse_disarmed": ("镇压", "血阴之患已被", "暂镇"),
-            "sect_at_brink": ("大祸", "护山阵剧烈", "大劫"),
-            "crisis_fired": ("护山异变", "大劫将至", "异象大作"),
-        }
-        words = mapping.get(key, ())
-        return any(w in beliefs_text for w in words)
+    def sensitive_world_known(self, key: str, session: GameSession) -> bool:
+        st = session.states.get(session.player_id())
+        if st and (st.flags or {}).get(f"knows_{key}"):
+            return True
+        cfg = self._cfg(session)
+        prefixes_map = cfg.get("world_flag_belief_prefixes") or {}
+        prefixes = tuple(prefixes_map.get(key) or (key,))
+        for b in self.player_beliefs(session):
+            bid = b.belief_id or ""
+            if any(bid.startswith(p) for p in prefixes):
+                return True
+        return False
 
     def _belief_mentions_location(
         self, session: GameSession, actor_id: str, location: str | None
     ) -> bool:
         if not location:
             return False
-        loc_name = self._loc_name(session, location)
-        text = " ".join(b.proposition for b in self.player_beliefs(session))
-        prof = session.profiles.get(actor_id)
-        name = prof.display_name if prof else actor_id
-        return name in text and (location in text or loc_name in text)
+        for b in self.player_beliefs(session):
+            bid = b.belief_id or ""
+            if bid.startswith(f"seen_{actor_id}_at_{location}"):
+                return True
+            if bid.startswith(f"loc_{actor_id}_{location}"):
+                return True
+        return False
 
     @staticmethod
     def _loc_name(session: GameSession, loc_id: str | None) -> str:

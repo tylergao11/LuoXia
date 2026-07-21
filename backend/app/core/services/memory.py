@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-from app.core.domain.models import Belief, GameSession
+from app.core.domain.models import GameSession
 
 
 class MemoryCompressor:
     """
-    Hermes 式压缩占位：按角色裁剪信念条数，旧见闻折成 flags.memory_digest。
-    不绑具体剧情；只做结构压缩。
+    信念条数裁剪：旧见闻折进 flags.memory_digest。
+
+    只 append，禁止砍头/改写已有 digest（否则打断 DeepSeek 前缀缓存，
+    也丢掉最早见闻）。长度控制留给 prompt：MEMORY 取前缀冻结，溢出进 DYNAMIC。
     """
 
-    def __init__(self, *, keep_recent: int = 12, digest_max_chars: int = 280) -> None:
+    def __init__(self, *, keep_recent: int = 12) -> None:
         self.keep_recent = keep_recent
-        self.digest_max_chars = digest_max_chars
 
     def compress_session(self, session: GameSession) -> int:
         """返回被折叠的信念条数。"""
@@ -31,10 +32,8 @@ class MemoryCompressor:
         st = session.states.get(actor_id)
         if st is not None:
             prev = str(st.flags.get("memory_digest") or "")
-            merged = (prev + " | " if prev else "") + " | ".join(digest_lines)
-            if len(merged) > self.digest_max_chars:
-                merged = "…" + merged[-self.digest_max_chars :]
-            st.flags["memory_digest"] = merged
+            chunk = " | ".join(digest_lines)
+            st.flags["memory_digest"] = (prev + " | " if prev else "") + chunk
             st.updated_day = session.day
         session.beliefs[actor_id] = recent
         return len(old)

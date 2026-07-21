@@ -50,18 +50,33 @@ class WorldEvolveStepper:
         return self.process_one(session_id)
 
     def _prefetch_intents(self, session_id: str, queue: list[str]) -> None:
-        """并行 intend，写入 graph_meta['evolve_intents']。"""
+        """
+        预取意图并写入 graph_meta['evolve_intents']。
+        优先一夜协商批次（含 play_order → 重排 evolve_queue）；否则回退 intend_many / 逐人。
+        """
         session = self.repo.get(session_id)
         if session is None or not queue:
             return
+
+        batch = getattr(self.mind, "intend_night_batch", None)
+        if callable(batch):
+            intents, play_order = batch(session, queue)
+            # 同一 session 对象保留 llm_threads；勿重新 get 丢掉批次上下文
+            if play_order and set(play_order) == set(queue):
+                session.evolve_queue = list(play_order)
+            session.graph_meta["evolve_intents"] = {
+                nid: (intent.model_dump(mode="json") if hasattr(intent, "model_dump") else intent)
+                for nid, intent in intents.items()
+            }
+            session.graph_meta["evolve_play_order"] = list(session.evolve_queue or [])
+            self.repo.save(session)
+            return
+
         intend_many = getattr(self.mind, "intend_many", None)
         if callable(intend_many):
             intents = intend_many(session, queue)
         else:
             intents = {nid: self.mind.intend(session, npc_id=nid) for nid in queue}
-        session = self.repo.get(session_id)
-        if session is None:
-            return
         session.graph_meta["evolve_intents"] = {
             nid: (intent.model_dump(mode="json") if hasattr(intent, "model_dump") else intent)
             for nid, intent in intents.items()
@@ -284,7 +299,6 @@ class WorldEvolveStepper:
         }
 
     def rollover(self, session_id: str) -> dict[str, Any]:
-        from app.core.services.crisis import CrisisTick
         from app.core.services.ending import EndingService
         from app.core.services.memory import MemoryCompressor
         from app.core.services.rumor import RumorPass
@@ -309,21 +323,16 @@ class WorldEvolveStepper:
             }
 
         session.phase = GamePhase.DAY_ROLLOVER
-        if hasattr(pack, "on_day_end"):
-            pack.on_day_end(session)
+        from app.core.services.content_packet import apply_packet
+
+        apply_packet(session, pack.on_day_end(session) or {})
 
         RumorPass().run(session)
 
         session.day += 1
-        if "xuanyin_countdown" in session.world_flags:
-            try:
-                session.world_flags["xuanyin_countdown"] = max(
-                    0, int(session.world_flags["xuanyin_countdown"]) - 1
-                )
-            except (TypeError, ValueError):
-                pass
+        # 倒计时 / 危机 / 封山：世界包 on_day_rollover 只回包，引擎 apply
+        apply_packet(session, pack.on_day_rollover(session) or {})
 
-        CrisisTick().run(session)
         MemoryCompressor().compress_session(session)
 
         session.evolve_queue = []

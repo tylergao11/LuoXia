@@ -14,8 +14,8 @@ from app.infra.llm_adjudicator import LLMAdjudicator
 from app.infra.llm_client import LLMClient
 from app.infra.llm_mind import LLMAgentMind
 from app.infra.memory_repo import InMemorySessionRepository
-from app.infra.mock_adjudicator import MockAdjudicator
-from app.infra.mock_mind import MockAgentMind
+from app.infra.scripted_adjudicator import ScriptedAdjudicator
+from app.infra.scripted_mind import ScriptedAgentMind
 from app.infra.sqlite_repo import SqliteSessionRepository
 
 
@@ -35,14 +35,17 @@ class Container:
         self.llm = LLMClient()
 
         if settings.use_llm and self.llm.available:
-            # 纯 LLM，失败直接抛，无 Mock 嵌套回退
             self.adjudicator = LLMAdjudicator(self.llm)
             self.mind = LLMAgentMind(self.llm)
             self.llm_mode = f"llm ({settings.llm_model})"
+        elif settings.allow_scripted_ports:
+            self.adjudicator = ScriptedAdjudicator(registry=self.registry)
+            self.mind = ScriptedAgentMind()
+            self.llm_mode = "scripted"
         else:
-            self.adjudicator = MockAdjudicator(registry=self.registry)
-            self.mind = MockAgentMind()
-            self.llm_mode = "mock"
+            raise RuntimeError(
+                "本产品仅支持 LLM 模式；请配置 LLM 或开启 allow_scripted_ports（仅开发/测试）"
+            )
 
         self.factory = GameFactory(self.registry)
         self.actions = ActionService(

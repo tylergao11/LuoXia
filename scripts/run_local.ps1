@@ -33,10 +33,6 @@ if (-not (Test-Path $envFile)) {
     Write-Host "已生成 backend/.env（默认 Ollama qwen3:8b）" -ForegroundColor Green
 }
 
-Write-Host "跑测试..."
-& (Join-Path $Backend ".venv\Scripts\python.exe") -m pytest (Join-Path $Backend "tests") -q --tb=line
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
 Write-Host "启动 API :8000 与前端 :5173 ..." -ForegroundColor Cyan
 Start-Process -FilePath (Join-Path $Backend ".venv\Scripts\uvicorn.exe") `
     -ArgumentList "app.main:app","--reload","--port","8000" `

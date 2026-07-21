@@ -213,7 +213,7 @@ export default function App() {
       readEventIdsRef.current = new Set();
       sealedShownRef.current = new Set();
       eventPayloadRef.current = {};
-      localStorage.setItem("luoxia_session_id", data.session.session_id);
+      localStorage.setItem("engine_session_id", data.session.session_id);
     } catch (e) {
       setBootError(String(e.message || e));
     } finally {
@@ -235,7 +235,7 @@ export default function App() {
       readEventIdsRef.current = new Set();
       sealedShownRef.current = new Set();
       eventPayloadRef.current = {};
-      localStorage.setItem("luoxia_session_id", id);
+      localStorage.setItem("engine_session_id", id);
       if (data.session?.phase === "WORLD_EVOLVE") {
         await drainNight(data.session.session_id, data.session);
       }
@@ -261,7 +261,7 @@ export default function App() {
         if (data.session) {
           cur = data.session;
           setSession(data.session);
-          localStorage.setItem("luoxia_session_id", data.session.session_id);
+          localStorage.setItem("engine_session_id", data.session.session_id);
         }
         if (data.message) {
           setEvolveHint(data.message);
@@ -290,7 +290,7 @@ export default function App() {
       const data = await api.action(session.session_id, body);
       if (data.session) {
         setSession(data.session);
-        localStorage.setItem("luoxia_session_id", data.session.session_id);
+        localStorage.setItem("engine_session_id", data.session.session_id);
       }
       if (data.message) pushLog(data.message);
       if (body.type === "talk") {
@@ -516,11 +516,16 @@ export default function App() {
 
   if (!session) {
     const lastId =
-      typeof localStorage !== "undefined" ? localStorage.getItem("luoxia_session_id") : null;
+      typeof localStorage !== "undefined"
+        ? localStorage.getItem("engine_session_id") ||
+          localStorage.getItem("luoxia_session_id")
+        : null;
     return (
       <div className="boot">
         <div className="boot-inner">
-          <h1 className="boot-title">落霞宗</h1>
+          <h1 className="boot-title">
+            {worlds.find((w) => w.world_id === worldId)?.display_name || "世界引擎"}
+          </h1>
           <p className="boot-lead">一言一念，皆入因果。天道衡断，众生自转。</p>
           {healthInfo && (
             <div className="boot-health">
@@ -569,7 +574,9 @@ export default function App() {
                   onClick={() => resume(g.session_id)}
                 >
                   <div className="name">
-                    {g.world_id === "qingxi" ? "青溪" : "落霞"} · 第{g.day}日
+                    {(worlds.find((w) => w.world_id === g.world_id)?.display_name ||
+                      g.world_id)}{" "}
+                    · 第{g.day}日
                   </div>
                   <div className="sub">{phaseLabel(g.phase)}</div>
                 </button>
@@ -622,7 +629,10 @@ export default function App() {
         ) : (
           <div className="topbar-main">
             <div className="topbar-left">
-              <span className="brand">落霞宗</span>
+              <span className="brand">
+                {worlds.find((w) => w.world_id === session.world_id)?.display_name ||
+                  session.world_id}
+              </span>
               <span className="stat topbar-stat">
                 第<strong>{session.day}</strong>/{session.max_days}日
                 {" · "}余力<strong>{session.ap}</strong>
@@ -1158,6 +1168,49 @@ export default function App() {
               {formatInventory(player.inventory)}
             </div>
           </div>
+          {(session.case_lines || []).length > 0 && (
+            <>
+              <h3 className="section-h">案线</h3>
+              <div className="case-lines">
+                {(session.case_lines || []).map((line) => (
+                  <div key={line.id} className="case-line">
+                    <div className="case-line-title">{line.title}</div>
+                    <div className="case-stages">
+                      {(line.stages || []).map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          className={`case-stage ${st.revealed ? "on" : "off"}`}
+                          title={st.revealed ? st.blurb || st.label_true : "尚未坐实"}
+                          onClick={() => {
+                            if (st.revealed && st.blurb) pushLog(st.blurb);
+                          }}
+                        >
+                          {st.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {(session.clue_flags || []).length > 0 && (
+            <>
+              <h3 className="section-h">隐情</h3>
+              <div className="clue-flags">
+                {(session.clue_flags || []).map((f) => (
+                  <div
+                    key={f.key}
+                    className={`clue-flag-row ${f.greyed ? "greyed" : ""}`}
+                  >
+                    <span className="clue-flag-label">{f.label_zh}</span>
+                    <span className="clue-flag-val">{f.display}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
           <h3 className="section-h">见闻</h3>
           <div className="logs compact">
             {(player.beliefs || []).length === 0 && (

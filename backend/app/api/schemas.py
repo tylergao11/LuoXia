@@ -33,6 +33,8 @@ class SessionView(BaseModel):
     all_actors: list[dict[str, Any]]
     recent_events: list[dict[str, Any]]
     world_flags_public: dict[str, Any]
+    case_lines: list[dict[str, Any]] = Field(default_factory=list)
+    clue_flags: list[dict[str, Any]] = Field(default_factory=list)
     game_over_reason: str | None = None
     ending_tags: list[str] = Field(default_factory=list)
     logs_self: list[dict[str, Any]] = Field(default_factory=list)

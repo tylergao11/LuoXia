@@ -1,70 +1,80 @@
-# 落霞宗 / LuoXia Engine
+# LuoXia · 落霞引擎
 
-事件驱动世界模拟引擎 + 世界包「落霞宗」。**引擎与内容分离**。
+事件驱动世界模拟：**引擎与内容分离**。落霞宗是第一个世界包，不是引擎本身。
 
-## 架构
+## 文档
 
-见 [docs/architecture.md](docs/architecture.md) · 本地 Qwen 见 [docs/qwen-local.md](docs/qwen-local.md)
+| 文档 | 内容 |
+|------|------|
+| [docs/architecture.md](docs/architecture.md) | 引擎分层与硬契约 |
+| [docs/luoxia.md](docs/luoxia.md) | 落霞世界包设定（内容真相源） |
+| [AGENTS.md](AGENTS.md) | Agent 约定（禁测试 / 文档纪律） |
 
 ```
-core/     领域 · 端口 · 服务 · LangGraph(+Sqlite 检查点)
-content/  luoxia · qingxi · 洛晴深度线
-infra/    SQLite 存档 · Mock/LLM · Ollama 兼容
+backend/app/
+  core/      领域 · 端口 · 服务 · 图
+  content/   luoxia · qingxi · …
+  infra/     存档 · Mock/LLM
+  api/       HTTP DTO（可换 3D 网关）
+frontend/    Web 试玩壳
 ```
 
-## 本地启动（推荐 Qwen3:8b）
+## 本地启动
 
-你本机 Ollama 已有 **`qwen3:8b`**（首选）与 `qwen3-vl:8b`（视觉，游戏暂不用）。
+推荐本机 Ollama **`qwen3:8b`**。
 
 ```powershell
-# 1. Ollama
-ollama serve
-
-# 2. 一键（测试 + API + 前端）
+# 可选一键
 powershell -File scripts/run_local.ps1
 ```
 
-或手动：
+手动：
 
 ```powershell
+# 终端 1：模型
+ollama serve
+
+# 终端 2：API
 cd backend
+python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env   # 默认已指向 Ollama qwen3:8b
+copy .env.example .env   # USE_LLM + Ollama 默认
 uvicorn app.main:app --reload --port 8000
 
-cd ..\frontend
+# 终端 3：前端
+cd frontend
 npm install
 npm run dev
 ```
 
 打开 http://localhost:5173  
 
-前端为 **竖版优先**（手机分辨率 / 桌面居中「手机框」max-width 430px，含安全区）。
+### Mock（不调模型）
 
-### 强制 Mock（不调模型）
+`backend/.env`：
 
-`.env` 设 `USE_LLM=false`
+```env
+USE_LLM=false
+```
 
-## 已具备
+### LLM（Ollama）
+
+```env
+USE_LLM=true
+LLM_API_KEY=ollama
+LLM_BASE_URL=http://127.0.0.1:11434/v1
+LLM_MODEL=qwen3:8b
+```
+
+`/api/health`：模型是否在线、JSON 模式、检查点等。
+
+## 能力一览
 
 | 能力 | 说明 |
 |------|------|
-| 双轨因果 | 无为危局 / 有为改 flags（解咒→化险为夷） |
-| Checkpointer | 图只存 id（可 msgpack）；`evolve_*` 每步落盘；默认可开 |
-| 传谣 | 延迟、跳数、冷却、失真随 hop 加重 |
-| 洛晴线 | 内容包阶段 trust→托付→同盟 |
-| 测试 | `pytest tests` · `python scripts/smoke.py` |
-| 多世界 | 落霞宗 / 青溪小驿 |
-
-## 测试
-
-```bash
-cd backend
-python -m pytest tests -q
-python scripts/smoke.py
-```
-
-当前约 **15** 项自动化测试（含 checkpointer 开启路径）。
-
-`/api/health` 可看：Ollama 是否在线、是否强制 JSON、图检查点是否开启。
+| 双轨因果 | 无为走劫数 / 有为改 flags |
+| WorldPack | 换世界 = 注册内容包 |
+| 同构事件包 | 线索/意图/钩子统一落地 |
+| 传谣 | 延迟、跳数、失真 |
+| 多客户端 | SessionView DTO；Web 可换 3D |

@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "落霞宗"
-    max_days: int = 30
+    max_days: int = 21
     daily_ap: int = 6
     move_ap_cost: int = 1
     cors_origins: list[str] = [
@@ -27,12 +27,14 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
     use_llm: bool = True
+    allow_scripted_ports: bool = False
     # 速度：关思考、限生成、探活缓存、并行意图
     llm_think: bool = False
     llm_timeout: float = 90.0
     llm_num_predict_default: int = 480
     llm_num_predict_reply: int = 360
     llm_num_predict_intend: int = 220
+    llm_num_predict_night_batch: int = 900
     llm_num_predict_adjudicate: int = 480
     llm_num_predict_dialogue: int = 520
     llm_available_cache_sec: float = 30.0

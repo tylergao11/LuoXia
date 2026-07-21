@@ -5,53 +5,87 @@ from app.core.domain.models import GameSession
 from app.core.services.visibility import VisibilityService
 
 
-_vis = VisibilityService()
+def _registry():
+    try:
+        from app.container import get_container
+
+        return get_container().registry
+    except Exception:
+        return None
+
+
+def _pack(session: GameSession):
+    reg = _registry()
+    if reg is None:
+        return None
+    try:
+        return reg.get(session.world_id)
+    except Exception:
+        return None
 
 
 def to_session_view(session: GameSession) -> SessionView:
+    """客户端 DTO：引擎通用可见性 + WorldPack.project_session_extra（Web/3D 共用）。"""
     pid = session.player_id()
     p_st = session.states[pid]
     loc = p_st.location
+    reg = _registry()
+    pack = None
+    if reg is not None:
+        try:
+            pack = reg.get(session.world_id)
+        except Exception:
+            pack = None
+    vis = VisibilityService(registry=reg)
 
     actors_here = [
-        _vis.actor_public_card(session, a) for a in session.actors_at(loc or "")
+        vis.actor_public_card(session, a) for a in session.actors_at(loc or "")
     ]
-    all_actors = [_vis.actor_public_card(session, a) for a in session.profiles]
+    all_actors = [vis.actor_public_card(session, a) for a in session.profiles]
 
     locations = []
     for nid, node in session.map.nodes.items():
-        locations.append(
-            {
-                "id": nid,
-                "name": node.name,
-                "summary": node.summary,
-                "art_key": node.art_key,
-                "neighbors": session.map.neighbors(nid),
-                "is_current": nid == loc,
-            }
-        )
+        row = {
+            "id": nid,
+            "name": node.name,
+            "summary": node.summary,
+            "art_key": node.art_key,
+            "neighbors": session.map.neighbors(nid),
+            "is_current": nid == loc,
+            "tags": list(node.tags or []),
+        }
+        if pack is not None:
+            row.update(pack.location_view_extra(session, nid))
+        else:
+            row["unlocked"] = True
+            row["locked"] = False
+            row["lock_reason"] = ""
+        locations.append(row)
 
-    events = [
-        _vis.mask_event(session, ev) for ev in session.events[-80:]
-    ]
+    events = [vis.mask_event(session, ev) for ev in session.events[-80:]]
     events = list(reversed(events))
 
-    # 信念列表（玩家自己的——全可见）
-    beliefs = [
-        {
-            "belief_id": b.belief_id,
-            "proposition": b.proposition,
-            "source": b.source.value if hasattr(b.source, "value") else b.source,
-            "truth_rel": b.truth_rel.value if hasattr(b.truth_rel, "value") else b.truth_rel,
-            "confidence": b.confidence,
-            "day": b.day,
-        }
-        for b in session.beliefs.get(pid, [])
-    ]
+    extra = pack.project_session_extra(session) if pack is not None else {}
+    beliefs = extra.get("beliefs")
+    if beliefs is None:
+        beliefs = [
+            {
+                "belief_id": b.belief_id,
+                "proposition": b.proposition,
+                "source": b.source.value if hasattr(b.source, "value") else b.source,
+                "truth_rel": b.truth_rel.value
+                if hasattr(b.truth_rel, "value")
+                else b.truth_rel,
+                "confidence": b.confidence,
+                "day": b.day,
+            }
+            for b in session.beliefs.get(pid, [])
+        ]
+    case_lines = list(extra.get("case_lines") or [])
+    clue_flags = list(extra.get("clue_flags") or [])
 
-    player_card = _vis.actor_public_card(session, pid)
+    player_card = vis.actor_public_card(session, pid)
     flags = dict(player_card.get("flags") or {})
-    # 压缩记忆对玩家自己始终可见
     if p_st.flags.get("memory_digest"):
         flags["memory_digest"] = p_st.flags["memory_digest"]
 
@@ -82,7 +116,9 @@ def to_session_view(session: GameSession) -> SessionView:
         actors_here=actors_here,
         all_actors=all_actors,
         recent_events=events,
-        world_flags_public=_vis.world_flags_view(session),
+        world_flags_public=vis.world_flags_view(session),
+        case_lines=case_lines,
+        clue_flags=clue_flags,
         game_over_reason=session.game_over_reason,
         ending_tags=session.ending_tags,
         logs_self=logs_self,

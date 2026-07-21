@@ -15,22 +15,8 @@ class RumorPass:
     - 见闻需 planted_day 后至少 delay_days 天才可传
     - hop >= max_hops 不再传
     - 传出后 next_spread_day = day + cooldown
-    - 失真次数随 hop 增加
+    - 失真随 hop 增加（前缀/截断，不维护词替换表）
     """
-
-    DISTORTIONS = (
-        ("一定", "可能"),
-        ("就是", "好像是"),
-        ("已死", "出事了"),
-        ("身亡", "出了事"),
-        ("内鬼", "可疑之人"),
-        ("血阴", "邪术"),
-        ("通告", "有人说上面发了话"),
-        ("密信", "一封来信"),
-        ("假信", "那封信不太对"),
-        ("镇压", "好像压住了"),
-        ("至宝", "要紧的东西"),
-    )
 
     def __init__(
         self,
@@ -187,20 +173,19 @@ class RumorPass:
         return candidates[0]
 
     def _distort(self, text: str, *, salt: int, hop: int) -> str:
-        out = text
-        # 跳数越高，替换越多
-        applied = 0
-        target = min(1 + hop, len(self.DISTORTIONS))
-        for i, (a, b) in enumerate(self.DISTORTIONS):
-            if applied >= target:
-                break
-            if (salt + i + hop) % max(2, 4 - hop) == 0 and a in out:
-                out = out.replace(a, b, 1)
-                applied += 1
-        if hop >= 2 and not out.startswith("听说") and not out.startswith("有人说"):
-            out = f"有人说{out}"
-        elif hop == 1 and not out.startswith("听说"):
+        """跳数失真：听说/有人说前缀 + 截断，不扫词替换表。"""
+        _ = salt
+        out = (text or "").strip()
+        if hop >= 1 and not out.startswith("听说") and not out.startswith("有人说"):
             out = f"听说{out}"
-        if hop >= 3 and "……" not in out:
-            out = out[: max(8, len(out) // 2)] + "……（记不清了）"
+        if hop >= 2:
+            if out.startswith("听说"):
+                out = f"有人说{out[2:]}"
+            elif not out.startswith("有人说"):
+                out = f"有人说{out}"
+        if hop >= 3:
+            cut = max(8, len(out) // 2)
+            out = out[:cut] + "……（记不清了）"
+        elif hop >= 2 and len(out) > 28:
+            out = out[: max(16, len(out) - hop * 3)] + "……"
         return out

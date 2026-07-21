@@ -44,7 +44,12 @@ class ActionService:
                 cp = None
         self._checkpointer = cp
         self._talk_graph = build_player_action_graph(
-            mind, adjudicator, repo, self.applier, checkpointer=cp
+            mind,
+            adjudicator,
+            repo,
+            self.applier,
+            checkpointer=cp,
+            registry=registry,
         )
         self._evolve = WorldEvolveStepper(
             mind,
@@ -113,6 +118,19 @@ class ActionService:
             return ActionResult(
                 ok=False, message="未知地点", session=session, error_code="BAD_LOC"
             )
+        # 地图锁：委托 WorldPack（可拔插）
+        try:
+            pack = self.registry.get(session.world_id)
+            pack.refresh_access_state(session)
+            if not pack.location_open(session, dest):
+                return ActionResult(
+                    ok=False,
+                    message=pack.location_lock_reason(session, dest) or "此处暂不可入",
+                    session=session,
+                    error_code="LOCKED",
+                )
+        except Exception:
+            pass
         cur = st.location
         if cur and not session.map.can_move(cur, dest):
             return ActionResult(
@@ -155,6 +173,24 @@ class ActionService:
                 ok=False, message="不在同一地点", session=session, error_code="NOT_COLOCATED"
             )
 
+        self.repo.save(session)
+        # Mock/测试：payload.simulate_clues → 天道同构事件包；simulate_intents → 行动意图
+        sim: list[str] = []
+        intents: list[str] = []
+        if isinstance(req.payload, dict):
+            raw = req.payload.get("simulate_clues") or req.payload.get("unlocked_clues") or []
+            if isinstance(raw, list):
+                sim = [str(x) for x in raw]
+            raw_i = req.payload.get("simulate_intents") or req.payload.get("intents") or []
+            if isinstance(raw_i, list):
+                intents = [str(x) for x in raw_i]
+            proc = req.payload.get("proclamation_content")
+            if proc is not None:
+                session.graph_meta["_talk_proclamation_content"] = str(proc)
+            else:
+                session.graph_meta.pop("_talk_proclamation_content", None)
+        session.graph_meta["_talk_simulate_clues"] = sim
+        session.graph_meta["_talk_simulate_intents"] = intents
         self.repo.save(session)
         cfg = None
         if self._checkpointer is not None:

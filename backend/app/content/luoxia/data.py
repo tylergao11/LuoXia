@@ -4,25 +4,25 @@ from __future__ import annotations
 
 BACKGROUND = """
 落霞宗曾是东域数一数二的剑宗。掌门落云子十五年前以一剑「落霞惊鸿」震慑四方。
-落云子已不在人世，宗门无真正掌权宗主，表面秩序由执法长老沈监察与大师兄云烨共同维持。
-三个月前，一封署玄阴殿的密信称一个月后「落霞秘境」将开、有大机缘——此为假信。
-真实危机与血阴咒、内鬼、至宝遗失等暗线相关；多数弟子仅知「秘境机缘」的公开说法。
-玩家以客卿弟子身份借住修炼。
+落云子已不在人世——对外称坐化，实则死于玄阴殿下毒；宗门无真正掌权宗主，表面秩序由执法长老沈监察与大师兄云烨共同维持。
+近日一封署玄阴殿的密信称「落霞秘境」将开、有大机缘——此为假信。护山阵阵眼已种血阴咒，开启仪式即是引爆；林溯为玄阴殿内应（自认只是削弱护山、借势争位，不知会炸宗）。
+宗门至宝「落霞剑髓」由落云子临终交洛晴藏匿。多数弟子仅知「秘境机缘」的公开说法。
+玩家以客卿弟子身份借住修炼。劫数倒计时与自然日并行，无为则世界自转向危。
 """.strip()
 
 LOCATIONS = [
-    {"id": "gate", "name": "山门", "summary": "落霞宗门户，盘查往来。", "tags": ["入口"]},
-    {"id": "square", "name": "落霞广场", "summary": "宗门枢纽，人声与传谣汇聚。", "tags": ["公共"]},
-    {"id": "mission", "name": "任务堂", "summary": "差遣、情报与「机缘」筹备。", "tags": ["职司"]},
-    {"id": "law", "name": "执法堂", "summary": "刑狱、禁足、通告起草。", "tags": ["职司", "刑"]},
-    {"id": "hall", "name": "宗主殿", "summary": "空置权位与落云子牌位，仪式仍在。", "tags": ["权力真空"]},
-    {"id": "elder", "name": "长老院", "summary": "长老议事起居。", "tags": ["职司"]},
-    {"id": "library", "name": "藏经阁", "summary": "典籍禁书，旧事碎片。", "tags": ["秘"]},
-    {"id": "arena", "name": "演武场", "summary": "比试切磋之地。", "tags": ["武"]},
-    {"id": "kitchen", "name": "伙房膳堂", "summary": "烟火与八卦的锅炉。", "tags": ["生活"]},
-    {"id": "dorm_outer", "name": "外门客居", "summary": "外门与客卿落脚处。", "tags": ["生活"]},
-    {"id": "dorm_inner", "name": "内门居所", "summary": "亲传与内门起居。", "tags": ["生活"]},
-    {"id": "backhill", "name": "后山", "summary": "静修、密会与阴影。", "tags": ["偏僻"]},
+    {"id": "gate", "name": "山门", "summary": "落霞宗门户，盘查往来。", "tags": ["入口", "start_open", "public"]},
+    {"id": "square", "name": "落霞广场", "summary": "宗门枢纽，人声与传谣汇聚。", "tags": ["公共", "start_open", "public", "social"]},
+    {"id": "mission", "name": "任务堂", "summary": "差遣、情报与「机缘」筹备。", "tags": ["职司", "gated", "order"]},
+    {"id": "law", "name": "执法堂", "summary": "刑狱、禁足、通告起草。", "tags": ["职司", "刑", "gated", "order", "archive"]},
+    {"id": "hall", "name": "宗主殿", "summary": "空置权位与落云子牌位，仪式仍在。", "tags": ["权力真空", "gated", "order"]},
+    {"id": "elder", "name": "长老院", "summary": "长老议事起居。", "tags": ["职司", "gated", "order"]},
+    {"id": "library", "name": "藏经阁", "summary": "典籍禁书，旧事碎片。", "tags": ["秘", "gated", "archive", "secluded"]},
+    {"id": "arena", "name": "演武场", "summary": "比试切磋之地。", "tags": ["武", "gated", "public"]},
+    {"id": "kitchen", "name": "伙房膳堂", "summary": "烟火与八卦的锅炉。", "tags": ["生活", "start_open", "public", "social"]},
+    {"id": "dorm_outer", "name": "外门客居", "summary": "外门与客卿落脚处。", "tags": ["生活", "start_open", "public"]},
+    {"id": "dorm_inner", "name": "内门居所", "summary": "亲传与内门起居。", "tags": ["生活", "gated", "secluded"]},
+    {"id": "backhill", "name": "后山", "summary": "静修、密会与阴影。", "tags": ["偏僻", "gated", "secluded"]},
 ]
 
 # 单向声明，pack 内补双向
@@ -62,7 +62,7 @@ ACTORS = [
         "personality": "外沉稳，内偏执紧绷，不轻信人",
         "drives": "查清宗门暗流，护住残局",
         "drive_priority": 100,
-        "default_location": "dorm_inner",
+        "default_location": "square",
         "tags": ["investigator"],
         "extra": {"realm": "筑基后期"},
     },
@@ -72,7 +72,7 @@ ACTORS = [
         "title": "二师兄",
         "summary": "风流会说话，宗门人缘极广。",
         "personality": "洒脱、圆融、善于藏锋",
-        "drives": "维持人设；关键时完成外部交代",
+        "drives": "维持人设；借玄阴扶持争位；不知血阴会炸宗",
         "drive_priority": 95,
         "default_location": "square",
         "tags": ["social", "hidden_allegiance"],
@@ -86,7 +86,7 @@ ACTORS = [
         "personality": "冷傲、好正统、厌混乱",
         "drives": "按她认为正确的方式主持宗门秩序",
         "drive_priority": 90,
-        "default_location": "hall",
+        "default_location": "square",
         "tags": ["order"],
         "extra": {"realm": "筑基中期"},
     },
@@ -94,9 +94,9 @@ ACTORS = [
         "id": "shi_mei",
         "display_name": "洛晴",
         "title": "小师妹",
-        "summary": "天赋极高却冷淡寡言，身负师父遗秘。",
+        "summary": "天赋极高却冷淡寡言，身负师父遗秘与落霞剑髓。",
         "personality": "冷淡、谨慎；想求助却极难信人",
-        "drives": "守密；在可信之人出现前独自承受",
+        "drives": "守遗命、护落霞剑髓、查师父死因；可信之人出现前独自承受",
         "drive_priority": 92,
         "default_location": "backhill",
         "tags": ["reclusive"],
@@ -123,7 +123,7 @@ ACTORS = [
         "personality": "精明、交换感强",
         "drives": "任务、人情与情报流通",
         "drive_priority": 70,
-        "default_location": "mission",
+        "default_location": "square",
         "tags": ["social"],
         "extra": {"realm": "筑基中期"},
     },
@@ -131,7 +131,7 @@ ACTORS = [
         "id": "cang_jing_guan",
         "display_name": "明镜",
         "title": "藏经阁管事",
-        "summary": "守阁如命，旧录中或有至宝线索。",
+        "summary": "守阁如命，旧录中或有血阴与剑髓来历。",
         "personality": "洁癖、守规则",
         "drives": "守典籍、审借阅",
         "drive_priority": 65,
@@ -198,7 +198,7 @@ STATE_SEEDS = {
         "inventory": [{"item_id": "token_guest", "name": "客卿令", "qty": 1}],
     },
     "da_shi_xiong": {
-        "location": "dorm_inner",
+        "location": "square",
         "identity": {"title": "大师兄"},
         "cultivation": {"realm": "筑基", "layer": 8},
         "resources": {"spirit_stones": 80},
@@ -208,20 +208,30 @@ STATE_SEEDS = {
         "identity": {"title": "二师兄"},
         "cultivation": {"realm": "筑基", "layer": 5},
         "resources": {"spirit_stones": 60},
-        "flags": {"allegiance": "xuanyin"},  # 高敏权威
+        # 内应；不知血阴会炸宗；不知下毒杀师（玄阴未坦白）
+        "flags": {
+            "allegiance": "xuanyin",
+            "believes_curse_only_weakens_array": True,
+            "knows_master_poisoned": False,
+        },
     },
     "san_shi_jie": {
-        "location": "hall",
+        "location": "square",
         "identity": {"title": "三师姐"},
         "cultivation": {"realm": "筑基", "layer": 6},
         "resources": {"spirit_stones": 50},
     },
     "shi_mei": {
-        "location": "backhill",
+        "location": "square",
         "identity": {"title": "小师妹"},
         "cultivation": {"realm": "炼气", "layer": 9, "talent": "high"},
         "resources": {"spirit_stones": 20},
-        "flags": {"knows_treasure_lost": True, "wants_help_but_distrusts": True},
+        "flags": {
+            "knows_treasure_lost": True,
+            "holds_luoxia_jian_sui": True,
+            "knows_master_poisoned": True,
+            "wants_help_but_distrusts": True,
+        },
     },
     "zhang_lao_fa": {
         "location": "law",
@@ -230,7 +240,7 @@ STATE_SEEDS = {
         "resources": {"spirit_stones": 200},
     },
     "ren_wu_tang_zhu": {
-        "location": "mission",
+        "location": "square",
         "identity": {"title": "任务堂堂主"},
         "cultivation": {"realm": "筑基", "layer": 4},
         "resources": {"spirit_stones": 70},
@@ -271,7 +281,7 @@ BELIEF_SEEDS = [
     {
         "belief_id": "b_public_secret_realm",
         "holder_id": "ren_wu_tang_zhu",
-        "proposition": "一个月后落霞秘境将开，是宗门大机缘",
+        "proposition": "近日落霞秘境将开，是宗门大机缘",
         "source": "told_by",
         "source_detail": "宗内传阅的玄阴殿来信说法",
         "truth_rel": "conflicts_authority",
@@ -294,16 +304,19 @@ WORLD_FLAGS = {
     "fake_secret_realm_letter": True,
     "blood_curse_planted": True,
     "blood_curse_host_unknown": True,
-    "xuanyin_countdown": 30,
+    "xuanyin_countdown": 21,
     "secret_realm_is_trigger": True,
+    "master_luoyun_poisoned_by_xuanyin": True,  # 权威隐秘；对玩家置灰直至信念坐实
+    "treasure_is_luoxia_jian_sui": True,
+    "jian_sui_required_for_disarm": False,  # 拍板：破阵不强制剑髓
+    "map_unlocked": [],
+    "seal_mountain": False,
 }
 
-# 日终额外权重（内容配置，引擎只做相加排序）
-# 随 countdown 收紧：越接近 0 阴谋相关角色越容易被抽到
+# 日终额外权重（内容配置）；键为 countdown 上限档
 EVOLVE_WEIGHT_BY_COUNTDOWN = {
-    # countdown_max_inclusive: {actor_id: bonus}
-    30: {},
-    20: {
+    21: {},
+    14: {
         "da_shi_xiong": 10,
         "er_shi_xiong": 15,
         "zhang_lao_fa": 5,
@@ -316,7 +329,7 @@ EVOLVE_WEIGHT_BY_COUNTDOWN = {
         "zhang_lao_fa": 15,
         "ren_wu_tang_zhu": 10,
     },
-    3: {
+    5: {
         "da_shi_xiong": 40,
         "er_shi_xiong": 50,
         "san_shi_jie": 30,

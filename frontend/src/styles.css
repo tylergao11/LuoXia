@@ -517,6 +517,18 @@ body,
   opacity: 0.55;
 }
 
+.card-btn.locked-loc {
+  cursor: default;
+}
+
+.card-btn .loc-lock-tag {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
 .bubbles {
   flex: 1;
   min-height: 0;
@@ -1322,6 +1334,92 @@ button.ghost {
 
 .logs.compact {
   max-height: 28dvh;
+}
+
+.belief-book {
+  max-height: 36dvh;
+  overflow-y: auto;
+}
+
+.belief-cat {
+  margin-bottom: 8px;
+}
+
+.belief-cat-h {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--accent2);
+  margin: 6px 0 4px;
+}
+
+.case-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.case-line-title {
+  font-size: 12px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.case-stages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.case-stage {
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  color: var(--muted);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: default;
+}
+
+.case-stage.on {
+  color: var(--text);
+  border-color: var(--accent2);
+  cursor: pointer;
+}
+
+.case-stage.off {
+  opacity: 0.55;
+}
+
+.clue-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.clue-flag-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.clue-flag-label {
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.clue-flag-val {
+  color: var(--muted);
+  text-align: right;
+}
+
+.clue-flag-row.greyed .clue-flag-label,
+.clue-flag-row.greyed .clue-flag-val {
+  color: var(--greyed, #6b7280);
+  opacity: 0.75;
 }
 
 .logs {

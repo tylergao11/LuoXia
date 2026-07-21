@@ -126,7 +126,7 @@ class MapGraph(BaseModel):
 class WorldRules(BaseModel):
     """内容包可覆盖的规则默认值。"""
 
-    max_days: int = 30
+    max_days: int = 21
     daily_ap: int = 6
     move_ap_cost: int = 1
     player_actor_id: ActorId = "player"
@@ -223,6 +223,7 @@ class AdjudicationResult(BaseModel):
     """世界级 flags 补丁（非角色状态）。"""
     world_flag_ops: dict[str, Any] = Field(default_factory=dict)
     ui_hints: dict[str, Any] = Field(default_factory=dict)
+    # 线索落地只认 events/ops；不再保留平行 unlocked_clues 字段
 
 
 class NpcReply(BaseModel):

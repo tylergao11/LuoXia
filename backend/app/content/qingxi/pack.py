@@ -46,16 +46,32 @@ class QingxiWorldPack(WorldPack):
     def build_map(self) -> MapGraph:
         nodes = {
             "yard": LocationNode(
-                id="yard", name="驿站前院", summary="拴马石与尘土飞扬。", art_key="yard"
+                id="yard",
+                name="驿站前院",
+                summary="拴马石与尘土飞扬。",
+                art_key="yard",
+                tags=["public", "order"],
             ),
             "hall": LocationNode(
-                id="hall", name="大堂", summary="酒饭与闲话。", art_key="hall"
+                id="hall",
+                name="大堂",
+                summary="酒饭与闲话。",
+                art_key="hall",
+                tags=["public", "social"],
             ),
             "room": LocationNode(
-                id="room", name="客房", summary="木床与纸窗。", art_key="room"
+                id="room",
+                name="客房",
+                summary="木床与纸窗。",
+                art_key="room",
+                tags=["secluded"],
             ),
             "road": LocationNode(
-                id="road", name="官道", summary="南来北往。", art_key="road"
+                id="road",
+                name="官道",
+                summary="南来北往。",
+                art_key="road",
+                tags=["public"],
             ),
         }
         edges = {
@@ -146,34 +162,56 @@ class QingxiWorldPack(WorldPack):
     def build_world_flags(self) -> dict[str, Any]:
         return {"peaceful_inn": True, "xuanyin_countdown": 14}
 
-    def on_new_game(self, session: Any) -> None:
+    def on_new_game(self, session: Any) -> dict:
+        from app.core.domain.models import BeliefOp
+
         pid = session.player_id()
         text = "你在青溪小驿落脚。可先到大堂找老郑打听官道消息，或在前院见见捕快。"
-        session.beliefs.setdefault(pid, []).append(
-            Belief(
-                belief_id="qingxi_guide",
-                holder_id=pid,
-                proposition=text,
-                source=BeliefSource.SELF,
-                day=1,
-                planted_day=1,
-            )
-        )
-        session.events.append(
-            WorldEvent(
-                kind=EventKind.WORLD,
-                severity=Severity.TRIVIAL,
-                title="驿站一宿",
-                summary=text,
-                actor_ids=[pid],
-                day=1,
-                known_to=[pid],
-                card_headline="落脚",
-                card_body=text,
-                involves_player=True,
-                tags=["guide"],
-            )
-        )
+        return {
+            "state_ops": [],
+            "belief_ops": [
+                BeliefOp(
+                    holder_id=pid,
+                    op="upsert",
+                    belief_id="qingxi_guide",
+                    proposition=text,
+                    source=BeliefSource.SELF,
+                    day=1,
+                )
+            ],
+            "events": [
+                WorldEvent(
+                    kind=EventKind.WORLD,
+                    severity=Severity.TRIVIAL,
+                    title="驿站一宿",
+                    summary=text,
+                    actor_ids=[pid],
+                    day=1,
+                    known_to=[pid],
+                    card_headline="落脚",
+                    card_body=text,
+                    involves_player=True,
+                    tags=["guide"],
+                )
+            ],
+            "world_flag_ops": {},
+            "notes": [],
+        }
+
+    def on_day_rollover(self, session: Any) -> dict:
+        if "xuanyin_countdown" not in (session.world_flags or {}):
+            return {}
+        try:
+            cd = max(0, int(session.world_flags["xuanyin_countdown"]) - 1)
+        except (TypeError, ValueError):
+            cd = 0
+        return {
+            "state_ops": [],
+            "belief_ops": [],
+            "events": [],
+            "world_flag_ops": {"xuanyin_countdown": cd},
+            "notes": [],
+        }
 
     def evaluate_ending_tags(self, session: Any) -> list[str]:
         tags = ["青溪一宿"]

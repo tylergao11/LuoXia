@@ -4,29 +4,21 @@ from typing import Any
 
 from app.core.domain.models import AdjudicationResult, GameSession
 
-# 路径 → 中文（玩家可读）
-_PATH_LABELS = {
+# 引擎通用路径标签（中性）；内容专有标签经 WorldPack.effect_path_labels
+_ENGINE_PATH_LABELS = {
     "alive": "生死",
     "location": "所在",
-    "resources.spirit_stones": "灵石",
-    "cultivation.realm": "境界",
-    "cultivation.layer": "修为层数",
     "body.wounded": "伤势",
-    "flags.trust": "对你的信任",
-    "flags.trust_player": "对你的信任",
-    "flags.trusts_player": "是否托付于你",
-    "flags.investigating_curse": "追查邪咒",
-    "flags.evidence_level": "线索积累",
     "flags.expelled": "是否被逐",
     "flags.dead": "已故",
     "identity.title": "身份",
-    "identity.expelled": "被逐出宗",
 }
 
 
-def _path_label(path: str) -> str:
-    if path in _PATH_LABELS:
-        return _PATH_LABELS[path]
+def _path_label(path: str, extra: dict[str, str] | None = None) -> str:
+    labels = {**_ENGINE_PATH_LABELS, **(extra or {})}
+    if path in labels:
+        return labels[path]
     if path.startswith("flags."):
         key = path.split(".", 1)[-1]
         return f"心境·{key}"
@@ -67,11 +59,25 @@ def _loc_name(session: GameSession, loc_id: Any) -> str:
     return node.name if node else str(loc_id)
 
 
+def _pack_labels(session: GameSession, registry: Any | None) -> dict[str, str]:
+    if registry is None:
+        return {}
+    try:
+        pack = registry.get(session.world_id)
+        fn = getattr(pack, "effect_path_labels", None)
+        if callable(fn):
+            return dict(fn() or {})
+    except Exception:
+        pass
+    return {}
+
+
 def summarize_adjudication(
     session: GameSession,
     adj: AdjudicationResult,
     *,
     focus_other_id: str | None = None,
+    registry: Any | None = None,
 ) -> dict[str, Any]:
     """
     把 state_ops / belief_ops / world_flag_ops 收成玩家可读摘要。
@@ -79,10 +85,11 @@ def summarize_adjudication(
     """
     pid = session.player_id()
     by_actor: dict[str, list[str]] = {}
+    path_labels = _pack_labels(session, registry)
 
     for op in adj.state_ops or []:
         aid = op.actor_id
-        label = _path_label(op.path)
+        label = _path_label(op.path, path_labels)
         if op.path == "location":
             val = _loc_name(session, op.value)
         else:
@@ -133,7 +140,6 @@ def summarize_adjudication(
             continue
         others.append({"id": aid, "name": _actor_name(session, aid), "lines": lines})
 
-    # 文本块：对话里直接展示
     blocks: list[str] = []
     if self_lines:
         blocks.append("【己身】\n" + "\n".join(f"· {x}" for x in self_lines))

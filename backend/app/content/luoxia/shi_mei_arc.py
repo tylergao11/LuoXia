@@ -1,6 +1,6 @@
 """
-洛晴深度线——纯内容包数据 + 推进逻辑。
-引擎只在 WorldPack.on_day_end / dialogue 钩子调用，不写死在 Graph。
+洛晴深度线——产出同构事件包（state_ops / belief_ops / world_flag_ops / events）。
+禁止直改 session；由 dialogue_hooks / pack 经 StateApplier 落地。
 """
 
 from __future__ import annotations
@@ -9,11 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.domain.enums import BeliefSource, EventKind, Severity, TruthRel
-from app.core.domain.models import Belief, GameSession, WorldEvent
+from app.core.domain.models import BeliefOp, GameSession, StateOp, WorldEvent
 
 SHI_MEI_ID = "shi_mei"
 
-# 阶段：按 trust_player 与 flags 推进（可被玩家加速）
 STAGES = [
     {
         "id": "guarded",
@@ -34,7 +33,7 @@ STAGES = [
         "flag": "arc_shi_mei_hint",
         "requires_trusts": True,
         "player_hint": "她承认至宝之事与外间传言不同。",
-        "belief": "洛晴暗示：宗门至宝其实早已不在「该在的地方」。",
+        "belief": "洛晴暗示：宗门至宝「落霞剑髓」其实早已不在「该在的地方」。",
         "world_note": "treasure_hint_shared",
     },
     {
@@ -43,8 +42,8 @@ STAGES = [
         "flag": "arc_shi_mei_partial",
         "requires_trusts": True,
         "player_hint": "她吐露师父临终所托的一角。",
-        "belief": "落云子临终曾托洛晴：至宝遗失多年，不可轻信宗内任何人。",
-        "npc_belief": "客卿或许可靠——但遗命仍在。",
+        "belief": "落云子临终曾托洛晴：落霞剑髓遗失之秘在她手中；师父之死或与玄阴下毒有关；不可轻信宗内任何人。",
+        "npc_belief": "客卿或许可靠——但遗命与剑髓仍在。",
         "world_note": "luoyun_last_words_partial",
     },
     {
@@ -60,6 +59,16 @@ STAGES = [
 ]
 
 
+def _empty() -> dict[str, Any]:
+    return {
+        "state_ops": [],
+        "belief_ops": [],
+        "world_flag_ops": {},
+        "events": [],
+        "notes": [],
+    }
+
+
 def trust_level(session: GameSession) -> int:
     st = session.states.get(SHI_MEI_ID)
     if not st:
@@ -70,88 +79,152 @@ def trust_level(session: GameSession) -> int:
         return 0
 
 
-def advance_on_dialogue(
-    session: GameSession, *, utterance: str
-) -> dict[str, Any]:
-    """对话后尝试推进阶段；返回 notes / events 由调用方合并。"""
-    return _try_advance(session, force_soft=True, utterance=utterance)
+def advance_on_dialogue(session: GameSession, *, utterance: str = "") -> dict[str, Any]:
+    """对话后尝试推进一档；只返回同构包，不写 session。"""
+    _ = utterance
+    return _try_advance(session, force_soft=True)
+
+
+def maybe_public_encounter_packet(session: GameSession) -> dict[str, Any]:
+    """偶遇：后山对玩家仍锁时，拉回公共区（同构包）。"""
+    from app.content.luoxia import map_access
+
+    out = _empty()
+    st = session.states.get(SHI_MEI_ID)
+    if not st or not st.alive:
+        return out
+    loc = st.location or ""
+    public = ("square", "kitchen", "dorm_outer", "gate")
+    if loc in public:
+        return out
+    if loc == "backhill" and not map_access.location_open_for_player(session, "backhill"):
+        out["state_ops"].extend(
+            [
+                StateOp(actor_id=SHI_MEI_ID, op="set", path="location", value="square"),
+                StateOp(
+                    actor_id=SHI_MEI_ID,
+                    op="set",
+                    path="flags.shi_mei_public_encounter",
+                    value=True,
+                ),
+            ]
+        )
+        out["events"].append(
+            WorldEvent(
+                event_id=f"shi_mei_enc_{uuid4().hex[:8]}",
+                kind=EventKind.WORLD,
+                severity=Severity.TRIVIAL,
+                title="偶遇·洛晴",
+                summary="有人在广场角落看见洛晴驻足片刻，旋又沉默走开。",
+                actor_ids=[SHI_MEI_ID],
+                location="square",
+                day=session.day,
+                known_to=[session.player_id()],
+                card_headline="偶遇洛晴",
+                card_body="她似在人群边缘一闪而过——并非只是后山的传闻。",
+                involves_player=True,
+                tags=["shi_mei_encounter", "public"],
+            )
+        )
+    return out
+
+
+def maybe_public_encounter(session: GameSession) -> list[WorldEvent]:
+    """兼容旧测试：经 apply_packet 落地后返回 events。"""
+    from app.core.services.content_packet import apply_packet
+
+    return apply_packet(session, maybe_public_encounter_packet(session))
+
+
+def day_end_packet(session: GameSession) -> dict[str, Any]:
+    """日终：偶遇 + 静默低阶段推进（同构包，不写 session）。"""
+    out = maybe_public_encounter_packet(session)
+    soft = _try_advance(session, force_soft=False)
+    # 合并时注意：偶遇已改 location 的 ops 尚未落地，_try_advance 仍读旧 location —— 可接受
+    out["state_ops"].extend(soft["state_ops"])
+    out["belief_ops"].extend(soft["belief_ops"])
+    out["world_flag_ops"].update(soft["world_flag_ops"])
+    out["events"].extend(soft["events"])
+    out["notes"].extend(soft["notes"])
+    return out
 
 
 def advance_on_day_end(session: GameSession) -> list[WorldEvent]:
-    """日终若信任已够，可静默推进低阶段；事件需写入 session。"""
-    out = _try_advance(session, force_soft=False, utterance="")
-    events = list(out.get("events") or [])
-    for e in events:
-        session.events.append(e)
-    return events
+    """兼容：经 apply_packet 落地日终包。"""
+    from app.core.services.content_packet import apply_packet
+
+    return apply_packet(session, day_end_packet(session))
 
 
-def _try_advance(
-    session: GameSession, *, force_soft: bool, utterance: str
-) -> dict[str, Any]:
+def _try_advance(session: GameSession, *, force_soft: bool) -> dict[str, Any]:
+    out = _empty()
     st = session.states.get(SHI_MEI_ID)
     if not st or not st.alive:
-        return {"events": [], "notes": []}
+        return out
     t = trust_level(session)
     trusts = bool(st.flags.get("trusts_player"))
-    events: list[WorldEvent] = []
-    notes: list[str] = []
+    # 已有 flag 只读当前 session（同回合多档时用 pending 集合）
+    pending_flags: set[str] = set()
 
     for stage in STAGES:
         flag = stage["flag"]
-        if st.flags.get(flag):
+        if st.flags.get(flag) or flag in pending_flags:
             continue
         if t < int(stage["min_trust"]):
             break
         if stage.get("requires_trusts") and not trusts:
             break
-        # 高阶段需要对话触发（避免挂机白给）
         if stage["id"] in ("partial_truth", "ally") and not force_soft:
             continue
-        if stage["id"] == "ally" and not any(
-            k in utterance for k in ("一起", "联手", "帮你查", "我们")
+        if stage["id"] == "ally" and not (
+            force_soft
+            or st.flags.get("ally_player")
+            or st.flags.get("arc_shi_mei_ally")
         ):
-            if force_soft:
-                continue
+            continue
 
-        st.flags[flag] = True
+        pending_flags.add(flag)
+        out["state_ops"].append(
+            StateOp(actor_id=SHI_MEI_ID, op="set", path=f"flags.{flag}", value=True)
+        )
         for k, v in (stage.get("set_flags") or {}).items():
-            st.flags[k] = v
+            out["state_ops"].append(
+                StateOp(actor_id=SHI_MEI_ID, op="set", path=f"flags.{k}", value=v)
+            )
         if stage.get("world_note"):
-            session.world_flags[stage["world_note"]] = True
+            out["world_flag_ops"][stage["world_note"]] = True
 
         pid = session.player_id()
         if stage.get("belief"):
-            session.beliefs.setdefault(pid, []).append(
-                Belief(
-                    belief_id=f"shi_mei_{stage['id']}_{uuid4().hex[:6]}",
+            out["belief_ops"].append(
+                BeliefOp(
                     holder_id=pid,
+                    op="upsert",
+                    belief_id=f"shi_mei_{stage['id']}_{uuid4().hex[:6]}",
                     proposition=stage["belief"],
                     source=BeliefSource.TOLD_BY,
                     source_detail=SHI_MEI_ID,
                     truth_rel=TruthRel.MATCHES_AUTHORITY,
                     confidence=0.8,
                     day=session.day,
-                    planted_day=session.day,
-                    hop=0,
                 )
             )
         if stage.get("npc_belief"):
-            session.beliefs.setdefault(SHI_MEI_ID, []).append(
-                Belief(
-                    belief_id=f"shi_mei_self_{stage['id']}",
+            out["belief_ops"].append(
+                BeliefOp(
                     holder_id=SHI_MEI_ID,
+                    op="upsert",
+                    belief_id=f"shi_mei_self_{stage['id']}",
                     proposition=stage["npc_belief"],
                     source=BeliefSource.SELF,
                     truth_rel=TruthRel.MATCHES_AUTHORITY,
                     confidence=0.9,
                     day=session.day,
-                    planted_day=session.day,
                 )
             )
         hint = stage.get("player_hint") or stage["id"]
-        notes.append(hint)
-        events.append(
+        out["notes"].append(hint)
+        out["events"].append(
             WorldEvent(
                 kind=EventKind.SOCIAL,
                 severity=Severity.MINOR
@@ -169,9 +242,7 @@ def _try_advance(
                 tags=["shi_mei_arc", stage["id"]],
             )
         )
-        # 一次对话最多推进一档
         if force_soft:
             break
 
-    # 事件交给裁决结果 apply，避免重复写入
-    return {"events": events, "notes": notes}
+    return out

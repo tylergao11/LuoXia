@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -16,16 +15,20 @@ from app.core.domain.models import (
     WorldEvent,
 )
 from app.core.ports.agent_mind import AgentMindPort
+from app.core.services.rule_intent import default_play_order, rule_intend, rule_intend_many
 from app.infra.llm_client import LLMClient
+from app.infra.night_batch import build_night_batch_messages, parse_night_batch
 from app.infra.prompt_blocks import (
     append_assistant,
     build_dialogue_api_messages,
-    build_single_user,
+    build_threaded_api_messages,
+    dumps_assistant_json,
 )
 
 REPLY_SYSTEM = """你是游戏中的一个 NPC，不是旁白，不是天道。
 ## 认知边界
 - 只有：人设、drives、tags、自己的权威状态摘要、自己的信念。
+- DYNAMIC.extra.tendencies（若有）是公开倾向摘要，须纳入语气与态度，但不是新秘密。
 - 看不到未写入信念的「权威阴谋」。
 - 守密/冷淡时极难交心；trusts_player 才可吐露部分秘密。
 
@@ -42,7 +45,7 @@ REPLY_SYSTEM = """你是游戏中的一个 NPC，不是旁白，不是天道。
 """
 
 INTEND_SYSTEM = """你是游戏中的 NPC，决定今天自主做什么。
-只根据人设、信念、自身状态与公开感受。
+只根据人设、信念、自身状态与公开感受；若有 DYNAMIC.extra.tendencies，须参考对应倾向。
 输出仅 JSON：
 {
   "goal_summary": "一句话",
@@ -58,6 +61,43 @@ INTEND_SYSTEM = """你是游戏中的 NPC，决定今天自主做什么。
 }
 - can_proclaim 为 true 时才可 proclaim。
 - 无事则 idle。
+- 不要输出 JSON 外文字。
+"""
+
+NIGHT_BATCH_SYSTEM = """你在做「夜演」：一次为多名 NPC 各自生成今晚意图，并排出落地顺序。
+
+## 认知与扮演
+- STABLE 里有全员静态人设；每位 NPC 的主观决策只许使用对应 ### SLOT 内的可见信息。
+- 禁止全知：不要使用未写入该 SLOT 的他人私密信念，不要发明权威阴谋细节。
+- 每位角色按自己的 personality / drives / tags / self_beliefs / public_tendency 行动，避免同质化套话。
+
+## 一夜协商（公开层）
+- 可以协调「公开行动冲突」：多人同往一处、互为 target、重复通告等。
+- 协调时仍保持各自动机合理；用 play_order 表达谁先谁后。
+- play_order 必须恰好覆盖 roster 全体、无重复。
+
+## 输出仅一个 JSON
+{
+  "play_order": ["npc_id", "..."],
+  "conflicts_resolved": ["可选：一句话说明消解了什么"],
+  "intents": [
+    {
+      "npc_id": "必须是 roster 成员",
+      "goal_summary": "一句话",
+      "action": {
+        "type": "talk|move|search|report|proclaim|idle|other",
+        "target_id": "可选",
+        "location": "地图 id 可选",
+        "utterance": "可选",
+        "detail": "可选"
+      },
+      "priority": "low|normal|high",
+      "based_on_beliefs": ["..."]
+    }
+  ]
+}
+- roster 中每人恰好一条 intent。
+- 无通告权者禁止 proclaim。
 - 不要输出 JSON 外文字。
 """
 
@@ -111,8 +151,10 @@ class LLMAgentMind(AgentMindPort):
         listener_id: str = "player",
     ) -> NpcReply:
         self._require_client()
-        user, metrics = build_single_user(
+        msgs, metrics = build_threaded_api_messages(
             session,
+            kind="reply",
+            thread_parts=[speaker_id],
             actor_ids=[speaker_id, listener_id],
             material={
                 "type": "dialogue",
@@ -123,11 +165,16 @@ class LLMAgentMind(AgentMindPort):
         )
         raw = self.client.chat_json(
             system=REPLY_SYSTEM,
-            user=user,
+            messages=msgs,
             temperature=0.7,
             max_tokens=settings.llm_num_predict_reply,
             tag="mind:reply",
             prompt_metrics=metrics,
+        )
+        append_assistant(
+            session,
+            metrics.get("thread_key") or f"reply:{speaker_id}",
+            dumps_assistant_json(raw),
         )
         self.last_source = "llm"
         return NpcReply(
@@ -142,19 +189,26 @@ class LLMAgentMind(AgentMindPort):
 
     def intend(self, session: GameSession, *, npc_id: str) -> NpcIntent:
         self._require_client()
-        user, metrics = build_single_user(
+        msgs, metrics = build_threaded_api_messages(
             session,
+            kind="intend",
+            thread_parts=[npc_id],
             actor_ids=[npc_id, session.player_id()],
             material={"type": "intend", "npc_id": npc_id},
             extra={"task": "daily_intent"},
         )
         raw = self.client.chat_json(
             system=INTEND_SYSTEM,
-            user=user,
+            messages=msgs,
             temperature=0.55,
             max_tokens=settings.llm_num_predict_intend,
             tag="mind:intend",
             prompt_metrics=metrics,
+        )
+        append_assistant(
+            session,
+            metrics.get("thread_key") or f"intend:{npc_id}",
+            dumps_assistant_json(raw),
         )
         action = raw.get("action") if isinstance(raw.get("action"), dict) else {"type": "idle"}
         self.last_source = "llm"
@@ -167,15 +221,17 @@ class LLMAgentMind(AgentMindPort):
         )
 
     def intend_many(self, session: GameSession, npc_ids: list[str]) -> dict[str, NpcIntent]:
-        """并行意图（共用同一会话快照，只读）。"""
+        """并行意图：先串行建 thread（各 NPC 独立键），再并行调模型，最后串行写回 assistant。"""
         if not npc_ids:
             return {}
         self._require_client()
 
         jobs = []
         for nid in npc_ids:
-            user, metrics = build_single_user(
+            msgs, metrics = build_threaded_api_messages(
                 session,
+                kind="intend",
+                thread_parts=[nid],
                 actor_ids=[nid, session.player_id()],
                 material={"type": "intend", "npc_id": nid},
                 extra={"task": "daily_intent"},
@@ -184,24 +240,26 @@ class LLMAgentMind(AgentMindPort):
                 {
                     "npc_id": nid,
                     "system": INTEND_SYSTEM,
-                    "user": user,
+                    "messages": msgs,
                     "temperature": 0.55,
                     "max_tokens": settings.llm_num_predict_intend,
                     "tag": f"mind:intend:{nid}",
                     "prompt_metrics": metrics,
+                    "thread_key": metrics.get("thread_key") or f"intend:{nid}",
                 }
             )
 
         out: dict[str, NpcIntent] = {}
+        raw_by_nid: dict[str, dict[str, Any]] = {}
         workers = min(len(jobs), int(settings.llm_parallel_workers))
         errors: list[str] = []
 
-        def one(job: dict[str, Any]) -> tuple[str, NpcIntent | None, str | None]:
+        def one(job: dict[str, Any]) -> tuple[str, NpcIntent | None, dict[str, Any] | None, str | None]:
             nid = job["npc_id"]
             try:
                 raw = self.client.chat_json(
                     system=job["system"],
-                    user=job["user"],
+                    messages=job["messages"],
                     temperature=job["temperature"],
                     max_tokens=job["max_tokens"],
                     tag=str(job.get("tag") or f"mind:intend:{nid}"),
@@ -217,25 +275,70 @@ class LLMAgentMind(AgentMindPort):
                         priority=str(raw.get("priority") or "normal"),
                         based_on_beliefs=list(raw.get("based_on_beliefs") or []),
                     ),
+                    raw,
                     None,
                 )
             except Exception as e:  # noqa: BLE001
-                return nid, None, f"{nid}:{e}"
+                return nid, None, None, f"{nid}:{e}"
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(one, j) for j in jobs]
             for f in as_completed(futs):
-                nid, intent, err = f.result()
+                nid, intent, raw, err = f.result()
                 if err:
                     errors.append(err)
-                elif intent is not None:
+                elif intent is not None and raw is not None:
                     out[nid] = intent
+                    raw_by_nid[nid] = raw
 
         if errors:
             raise RuntimeError("intend_many 失败: " + "; ".join(errors[:3]))
 
+        # 串行写回，避免并行改 graph_meta
+        for job in jobs:
+            nid = job["npc_id"]
+            raw = raw_by_nid.get(nid)
+            if raw is None:
+                continue
+            append_assistant(session, str(job["thread_key"]), dumps_assistant_json(raw))
+
         self.last_source = "llm_parallel"
         return out
+
+    def intend_night_batch(
+        self, session: GameSession, npc_ids: list[str]
+    ) -> tuple[dict[str, NpcIntent], list[str]]:
+        """
+        日终一次协商：密封分栏意图 + play_order。
+        失败则全员规则意图 + 驱动序。
+        """
+        queue = [nid for nid in npc_ids if nid in session.profiles]
+        if not queue:
+            return {}, []
+        self._require_client()
+        msgs, metrics = build_night_batch_messages(session, queue)
+        try:
+            raw = self.client.chat_json(
+                system=NIGHT_BATCH_SYSTEM,
+                messages=msgs,
+                temperature=0.45,
+                max_tokens=settings.llm_num_predict_night_batch,
+                tag="mind:intend_night_batch",
+                prompt_metrics=metrics,
+            )
+            append_assistant(
+                session,
+                metrics.get("thread_key") or "intend_batch:night",
+                dumps_assistant_json(raw),
+            )
+            intents, order = parse_night_batch(session, queue, raw)
+            self.last_source = "llm_night_batch"
+            return intents, order
+        except Exception:
+            # 整包失败：规则兜底，不打断收日
+            intents = rule_intend_many(session, queue)
+            self.last_source = "rule_night_batch_fallback"
+            return intents, default_play_order(session, queue)
 
     def dialogue_turn(
         self,
@@ -267,7 +370,7 @@ class LLMAgentMind(AgentMindPort):
         append_assistant(
             session,
             metrics.get("thread_key") or f"dlg:{speaker_id}",
-            json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            dumps_assistant_json(raw),
         )
         reply = NpcReply(
             speaker_id=speaker_id,

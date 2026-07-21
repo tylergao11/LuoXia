@@ -12,35 +12,20 @@ from app.core.domain.models import (
     WorldEvent,
 )
 from app.core.ports.adjudicator import AdjudicatorPort
-from app.core.services.investigation import InvestigationResolver
 from app.core.services.world_registry import WorldRegistry
 
 
-class MockAdjudicator(AdjudicatorPort):
+class ScriptedAdjudicator(AdjudicatorPort):
     """
-    无 LLM 时的可运行裁决器：通用对话/传播/通告规则。
-    不写死某世界剧情分支；只认关键词、权职、同地、世界 flags 键是否存在。
-    USE_LLM=false 时的纯规则天道（测试/离线）。
+    无 LLM 时的可运行裁决器。
+    不扫台词：线索用 material.simulate_clues；意图用 material.simulate_intents /
+    npc_wants_action / npc_intent_tags（与天道事件同构）。
     """
 
-    last_source: str = "mock"
+    last_source: str = "scripted"
 
     def __init__(self, registry: WorldRegistry | None = None) -> None:
         self.registry = registry
-
-    # 玩家说出口后写入「见闻」的线索词 → (命题模板, truth_rel 粗分)
-    CLUE_KEYWORDS: list[tuple[tuple[str, ...], str, TruthRel]] = [
-        (("血阴", "血咒"), "听说宗内或有血阴类邪咒隐患", TruthRel.UNKNOWN_TO_AUTHORITY),
-        (("内鬼", "细作", "卧底"), "有人怀疑宗内有内鬼或细作", TruthRel.UNKNOWN_TO_AUTHORITY),
-        (("假信", "骗局", "不是机缘"), "有人说秘境机缘的密信可能有假", TruthRel.CONFLICTS_AUTHORITY),
-        (("秘境", "开启"), "众人议论秘境即将开启之事", TruthRel.UNKNOWN_TO_AUTHORITY),
-        (("至宝", "剑髓", "遗失"), "有人提及宗门至宝或有异动/遗失", TruthRel.UNKNOWN_TO_AUTHORITY),
-    ]
-
-    REPORT_KEYWORDS = ("通告", "昭告", "公示", "请长老通告", "发榜")
-    RUMOR_KEYWORDS = ("听说", "传言", "有人说", "悄悄告诉你")
-    ATTACK_KEYWORDS = ("杀", "动手", "斩", "灭口", "宰了", "取你性命", "决斗", "比试")
-    LETHAL_KEYWORDS = ("杀", "斩", "灭口", "宰了", "取你性命")
 
     REALM_POWER = {
         "凡人": 0,
@@ -59,7 +44,7 @@ class MockAdjudicator(AdjudicatorPort):
         current_material: dict[str, Any],
         phase: str = "player_action",
     ) -> AdjudicationResult:
-        self.last_source = "mock"
+        self.last_source = "scripted"
         mtype = current_material.get("type")
         if mtype == "dialogue":
             return self._dialogue(session, actor_ids, current_material, phase)
@@ -69,6 +54,26 @@ class MockAdjudicator(AdjudicatorPort):
             narrative_summary="无显著变化",
             ap_cost=1 if phase == "player_action" else 0,
         )
+
+    def _collect_intents(self, material: dict[str, Any]) -> set[str]:
+        out: set[str] = set()
+        raw = material.get("simulate_intents") or material.get("intents") or []
+        if isinstance(raw, list):
+            out.update(str(x) for x in raw)
+        for tag in material.get("npc_intent_tags") or []:
+            t = str(tag)
+            if t.startswith("intent:"):
+                out.add(t.split(":", 1)[1])
+            else:
+                out.add(t)
+        wa = material.get("npc_wants_action")
+        if isinstance(wa, dict) and wa.get("type"):
+            out.add(str(wa["type"]))
+        # 线索包也可带意图别名
+        for c in material.get("simulate_clues") or []:
+            if str(c) in ("proclamation_request", "rumor_seed", "attack", "attack_lethal"):
+                out.add(str(c))
+        return out
 
     def _dialogue(
         self,
@@ -83,6 +88,7 @@ class MockAdjudicator(AdjudicatorPort):
         npc_line = material.get("npc_utterance") or ""
         loc = material.get("location")
         npc_name = session.profiles[npc].display_name
+        intents = self._collect_intents(material)
 
         events: list[WorldEvent] = [
             WorldEvent(
@@ -126,47 +132,38 @@ class MockAdjudicator(AdjudicatorPort):
         state_ops: list[StateOp] = []
         proclamation = None
         narrative = "对话已留下痕迹。"
+        world_flag_ops: dict[str, Any] = {}
+        game_flags: dict[str, Any] = {}
 
-        # 线索词 → 双方见闻（玩家也写入信念，便于置灰点亮）
-        for keys, prop, truth in self.CLUE_KEYWORDS:
-            if any(k in utter for k in keys):
-                bid = f"clue_{keys[0]}_d{session.day}"
-                for hid in (player, npc):
-                    belief_ops.append(
-                        BeliefOp(
-                            holder_id=hid,
-                            op="upsert",
-                            belief_id=f"{bid}_{hid}",
-                            proposition=prop,
-                            source=BeliefSource.TOLD_BY if hid == npc else BeliefSource.SELF,
-                            source_detail="对话",
-                            truth_rel=truth,
-                            confidence=0.55,
-                            day=session.day,
-                        )
-                    )
-                state_ops.append(
-                    StateOp(
-                        actor_id=player,
-                        op="set",
-                        path="flags.last_sensitive_topic",
-                        value=utter[:50],
-                    )
-                )
-                narrative = f"话题触及敏感处：{prop}"
-                events[0].severity = Severity.MINOR
-                events[0].tags.append("clue")
+        # 模拟天道线索事件包（WorldPack 可拔插）
+        sim = material.get("simulate_clues") or []
+        if isinstance(sim, list) and sim and self.registry is not None:
+            pack = self.registry.get(session.world_id)
+            chunk = pack.merge_clue_packets(
+                session,
+                [
+                    str(x)
+                    for x in sim
+                    if str(x)
+                    not in ("proclamation_request", "rumor_seed", "attack", "attack_lethal")
+                ],
+                player_id=player,
+                npc_id=npc,
+                location=loc if isinstance(loc, str) else None,
+            )
+            state_ops.extend(chunk.get("state_ops") or [])
+            belief_ops.extend(chunk.get("belief_ops") or [])
+            events.extend(chunk.get("events") or [])
+            world_flag_ops.update(chunk.get("world_flag_ops") or {})
+            if chunk.get("notes"):
+                narrative = " ".join(chunk["notes"])
 
-        # 向有通告权者请求通告
         prof = session.profiles.get(npc)
         can_proc = bool(prof and prof.can_proclaim) or bool(
             session.states.get(npc) and session.states[npc].identity.get("can_proclaim")
         )
-        if can_proc and any(k in utter for k in self.REPORT_KEYWORDS):
-            content = utter
-            for k in self.REPORT_KEYWORDS:
-                content = content.replace(k, "")
-            content = content.strip(" ，。；、") or "即日起加强巡查，勿信妄言。"
+        if can_proc and ("proclamation" in intents or "proclamation_request" in intents):
+            content = (material.get("proclamation_content") or utter or "即日起加强巡查，勿信妄言。").strip()
             if len(content) > 80:
                 content = content[:80]
             proclamation = {
@@ -194,8 +191,7 @@ class MockAdjudicator(AdjudicatorPort):
                 )
             )
 
-        # 传谣：把玩家一句话种进对方信念（可再被日终扩散）
-        if any(k in utter for k in self.RUMOR_KEYWORDS):
+        if "rumor_seed" in intents or "rumor" in intents:
             belief_ops.append(
                 BeliefOp(
                     holder_id=npc,
@@ -212,46 +208,12 @@ class MockAdjudicator(AdjudicatorPort):
             narrative = "言语如风，或将再传。"
             events[0].tags.append("rumor_seed")
 
-        # 探索推进（假信/血阴/指认）——通用 InvestigationResolver
-        inv = InvestigationResolver().apply_dialogue(
-            session,
-            player_id=player,
-            npc_id=npc,
-            utterance=utter,
-            location=loc,
-        )
-        state_ops.extend(inv["state_ops"])
-        belief_ops.extend(inv["belief_ops"])
-        events.extend(inv["events"])
-        world_flag_ops = dict(inv.get("flag_patches") or {})
-        if inv.get("notes"):
-            narrative = narrative + " " + " ".join(inv["notes"])
-
-        # 世界包对话钩子（如洛晴深度线）
-        if self.registry is not None:
-            try:
-                pack = self.registry.get(session.world_id)
-                hook = pack.on_dialogue(
-                    session,
-                    player_id=player,
-                    npc_id=npc,
-                    utterance=utter,
-                )
-                if hook.get("notes"):
-                    narrative = narrative + " " + " ".join(hook["notes"])
-                for ev in hook.get("events") or []:
-                    events.append(ev)
-            except Exception:
-                pass
-
-        # 对抗意图：比较修为层，叙事优先（可伤可败，不保证秒杀高阶）
-        game_flags: dict[str, Any] = {}
-        if any(k in utter for k in self.ATTACK_KEYWORDS):
+        if "attack" in intents or "attack_lethal" in intents or "combat" in intents:
             combat = self._resolve_combat(
                 session,
                 attacker_id=player,
                 defender_id=npc,
-                lethal=any(k in utter for k in self.LETHAL_KEYWORDS),
+                lethal="attack_lethal" in intents or "lethal" in intents,
                 location=loc,
             )
             state_ops.extend(combat["state_ops"])
@@ -259,9 +221,9 @@ class MockAdjudicator(AdjudicatorPort):
             events.extend(combat["events"])
             narrative = combat["narrative"]
             game_flags.update(combat.get("game_flags") or {})
-            ap = max(2, 1 if len(utter) >= 4 else 0)
+            ap = 2
         else:
-            ap = 0 if len(utter) < 4 else 1
+            ap = 1 if utter else 0
 
         if phase != "player_action":
             ap = 0

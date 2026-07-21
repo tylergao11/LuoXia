@@ -30,10 +30,12 @@ def build_player_action_graph(
     repo: SessionRepositoryPort,
     applier: StateApplier | None = None,
     checkpointer=None,
+    registry: Any | None = None,
 ):
     """
     LLM：build_context → dialogue_turn（1×LLM）→ persist
     Mock：无 dialogue_turn → npc_reply + tiandao → persist
+    registry 由 ActionService 注入，禁止 core 反查 container。
     """
     applier = applier or StateApplier()
 
@@ -74,7 +76,11 @@ def build_player_action_graph(
             "npc_utterance": reply.utterance,
             "npc_engagement": reply.engagement,
             "npc_wants_action": reply.wants_action,
+            "npc_intent_tags": list(reply.intent_tags or []),
             "fast_path": True,
+            "simulate_clues": list(session.graph_meta.get("_talk_simulate_clues") or []),
+            "simulate_intents": list(session.graph_meta.get("_talk_simulate_intents") or []),
+            "proclamation_content": session.graph_meta.get("_talk_proclamation_content"),
         }
         session.graph_meta["_talk_adj"] = adj.model_dump(mode="json")
         session.graph_meta["_talk_fast"] = True
@@ -115,6 +121,10 @@ def build_player_action_graph(
             "npc_utterance": reply.utterance,
             "npc_engagement": reply.engagement,
             "npc_wants_action": reply.wants_action,
+            "npc_intent_tags": list(reply.intent_tags or []),
+            "simulate_clues": list(session.graph_meta.get("_talk_simulate_clues") or []),
+            "simulate_intents": list(session.graph_meta.get("_talk_simulate_intents") or []),
+            "proclamation_content": session.graph_meta.get("_talk_proclamation_content"),
         }
         repo.save(session)
         return {"npc_utterance": reply.utterance or ""}
@@ -147,29 +157,49 @@ def build_player_action_graph(
         if state.get("error"):
             return {}
         from app.core.domain.models import AdjudicationResult
+        from app.core.services.dialogue_hooks import (
+            after_flags_refresh_map,
+            merge_dialogue_hard_hooks,
+        )
         from app.core.services.effect_summary import summarize_adjudication
 
         session = repo.get(state["session_id"])
         assert session is not None
         raw = session.graph_meta.get("_talk_adj") or {}
         adj = AdjudicationResult.model_validate(raw)
+
+        # 硬状态钩子：内容包 / 地图解锁（Mock 与 LLM 统一）；registry 由构图闭包注入
+        adj = merge_dialogue_hard_hooks(
+            session,
+            adj,
+            player_id=state["player_id"],
+            npc_id=state["target_id"],
+            utterance=state.get("utterance") or "",
+            registry=registry,
+        )
+
         created = applier.apply(session, adj)
+        after_flags_refresh_map(session, registry)
         cost = max(0, int(state.get("ap_cost") or adj.ap_cost or 0))
         session.ap = max(0, session.ap - min(cost, session.ap))
         if session.phase != GamePhase.GAME_OVER:
             session.phase = GamePhase.PLAYER_TURN
-        # 己身/对方状态变化，供 API 与气泡直接展示
         effects = summarize_adjudication(
-            session, adj, focus_other_id=state.get("target_id")
+            session,
+            adj,
+            focus_other_id=state.get("target_id"),
+            registry=registry,
         )
         session.graph_meta["last_effects"] = effects
-        # 本轮新生事件（前端封条卡必须用这个，禁止猜 recent[0]）
         session.graph_meta["last_new_events"] = [
             e.model_dump(mode="json") for e in (created or [])
         ]
         session.graph_meta.pop("_talk_material", None)
         session.graph_meta.pop("_talk_adj", None)
         session.graph_meta.pop("_talk_fast", None)
+        session.graph_meta.pop("_talk_simulate_clues", None)
+        session.graph_meta.pop("_talk_simulate_intents", None)
+        session.graph_meta.pop("_talk_proclamation_content", None)
         repo.save(session)
         return {
             "narrative": state.get("narrative") or adj.narrative_summary or "",

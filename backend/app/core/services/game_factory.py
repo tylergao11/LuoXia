@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.core.domain.enums import GamePhase
 from app.core.domain.models import GameSession
 from app.core.ports.world_pack import WorldPack
+from app.core.services.content_packet import apply_packet
 from app.core.services.world_registry import WorldRegistry
 
 
@@ -32,6 +33,6 @@ class GameFactory:
             world_flags=pack.build_world_flags(),
             background_text=pack.background_text(),
         )
-        if hasattr(pack, "on_new_game"):
-            pack.on_new_game(session)
+        packet = pack.on_new_game(session) or {}
+        apply_packet(session, packet)
         return session
