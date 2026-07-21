@@ -13,6 +13,21 @@ from app.core.ports.world_pack import WorldPack
 from app.core.services.state_applier import StateApplier
 
 
+def _settlement_message(session) -> str:
+    """终局文案投影：读 settlement 事件，不读 graph_meta 影子。"""
+    for ev in reversed(session.events or []):
+        tags = ev.tags or []
+        if "settlement" in tags:
+            return (ev.card_body or ev.summary or ev.title or "").strip()
+    ids = (session.graph_meta or {}).get("settlement_event_ids") or []
+    if ids:
+        idset = set(ids)
+        for ev in reversed(session.events or []):
+            if ev.event_id in idset:
+                return (ev.card_body or ev.summary or ev.title or "").strip()
+    return ""
+
+
 class WorldEvolveStepper:
     """
     日终步进：select → process_one* → rollover。
@@ -164,7 +179,10 @@ class WorldEvolveStepper:
         return self.mind.intend(session, npc_id=npc_id)
 
     def _apply_simple_move(self, session, npc_id: str, location: str, goal: str) -> bool:
-        """合法移动不走 LLM 裁决。"""
+        """合法移动：同构包 → apply_packet，不直写 events。"""
+        from app.core.domain.models import StateOp
+        from app.core.services.content_packet import apply_packet
+
         st = session.states.get(npc_id)
         if not st or not st.alive:
             return False
@@ -172,27 +190,32 @@ class WorldEvolveStepper:
             return False
         cur = st.location
         if cur and not session.map.can_move(cur, location) and cur != location:
-            # 无边时仍允许同图瞬移式夜行（避免卡死），若严格可 return False
             pass
-        st.location = location
-        st.updated_day = session.day
         name = session.profiles[npc_id].display_name if npc_id in session.profiles else npc_id
         loc_name = session.map.nodes[location].name
-        session.events.append(
-            WorldEvent(
-                kind=EventKind.OTHER,
-                severity=Severity.TRIVIAL,
-                title=f"{name}移步",
-                summary=goal or f"{name}前往{loc_name}",
-                actor_ids=[npc_id],
-                location=location,
-                day=session.day,
-                known_to=[npc_id],
-                card_headline=f"{name}的夜行",
-                card_body=f"{name}夜至{loc_name}。",
-                tags=["world_evolve", "move", "fast_path"],
-            )
-        )
+        packet = {
+            "state_ops": [
+                StateOp(actor_id=npc_id, op="set", path="location", value=location),
+            ],
+            "belief_ops": [],
+            "world_flag_ops": {},
+            "events": [
+                WorldEvent(
+                    kind=EventKind.OTHER,
+                    severity=Severity.TRIVIAL,
+                    title=f"{name}移步",
+                    summary=goal or f"{name}前往{loc_name}",
+                    actor_ids=[npc_id],
+                    location=location,
+                    day=session.day,
+                    known_to=[npc_id],
+                    card_headline=f"{name}的夜行",
+                    card_body=f"{name}夜至{loc_name}。",
+                    tags=["world_evolve", "move", "fast_path"],
+                )
+            ],
+        }
+        apply_packet(session, packet, applier=self.applier)
         return True
 
     def process_one(self, session_id: str) -> dict[str, Any]:
@@ -299,7 +322,6 @@ class WorldEvolveStepper:
         }
 
     def rollover(self, session_id: str) -> dict[str, Any]:
-        from app.core.services.ending import EndingService
         from app.core.services.memory import MemoryCompressor
         from app.core.services.rumor import RumorPass
 
@@ -310,14 +332,24 @@ class WorldEvolveStepper:
         pack = self.get_pack(session.world_id)
 
         if session.phase == GamePhase.GAME_OVER:
-            EndingService().finalize(session, pack, reason=session.game_over_reason)
+            if not session.game_over_reason:
+                session.game_over_reason = "尘缘已尽"
+            from app.core.services.settlement import settle_if_needed
+
+            settle_if_needed(
+                session,
+                self.adjudicator,
+                self.applier,
+                reason=session.game_over_reason,
+            )
             session.evolve_queue = []
             session.evolve_index = 0
             session.graph_meta["evolve_last_actor"] = ""
             session.graph_meta.pop("evolve_intents", None)
             self.repo.save(session)
+            msg = _settlement_message(session) or session.game_over_reason
             return {
-                "message": session.game_over_reason or "尘缘已尽",
+                "message": msg or "尘缘已尽",
                 "done": True,
                 "last_actor_id": "",
             }
@@ -342,9 +374,18 @@ class WorldEvolveStepper:
 
         if session.day > session.rules.max_days:
             session.phase = GamePhase.MONTH_END
-            EndingService().finalize(session, pack, reason="一月期满")
+            session.game_over_reason = session.game_over_reason or "一月期满"
+            from app.core.services.settlement import settle_if_needed
+
+            settle_if_needed(
+                session,
+                self.adjudicator,
+                self.applier,
+                reason=session.game_over_reason,
+            )
             self.repo.save(session)
-            return {"message": "一月期满", "done": True, "last_actor_id": ""}
+            msg = _settlement_message(session) or "一月期满"
+            return {"message": str(msg), "done": True, "last_actor_id": ""}
 
         prev = session.day - 1
         session.ap = session.rules.daily_ap

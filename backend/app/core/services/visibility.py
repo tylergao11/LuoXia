@@ -54,10 +54,18 @@ class VisibilityService:
 
     def mask_event(self, session: GameSession, ev: WorldEvent) -> dict[str, Any]:
         visible = self.event_visible_to_player(session, ev)
+        raw_body = ev.card_body if visible else ""
+        raw_summary = ev.summary if visible else "（你尚未得知详情）"
+        # 旧存档可能把整轮局势块误嵌进 card_body；投影时剥掉，事件权威只留叙事
+        if visible and raw_body:
+            raw_body = str(raw_body).split("——局势——")[0].strip()
+        if visible and raw_summary:
+            s = str(raw_summary).split("——局势——")[0].strip()
+            raw_summary = s or "（无摘要）"
         return {
             "event_id": ev.event_id,
             "title": ev.title if visible else "未明之事",
-            "summary": ev.summary if visible else "（你尚未得知详情）",
+            "summary": raw_summary,
             "kind": ev.kind.value if hasattr(ev.kind, "value") else str(ev.kind),
             "severity": ev.severity.value if hasattr(ev.severity, "value") else str(ev.severity),
             "day": ev.day,
@@ -66,7 +74,7 @@ class VisibilityService:
             "known": visible,
             "greyed": not visible,
             "card_headline": ev.card_headline if visible else "？？",
-            "card_body": ev.card_body if visible else "",
+            "card_body": raw_body,
             "location": ev.location,
             "actor_ids": ev.actor_ids if visible else [],
             "tags": ev.tags if visible else [],
@@ -87,7 +95,14 @@ class VisibilityService:
         flags_public: dict[str, Any] = {}
         flags_greyed: dict[str, Any] = {}
         for k, v in (st.flags or {}).items():
+            # 下划线开头 = 引擎内部标记，不对客户端暴露
             if str(k).startswith("_"):
+                continue
+            # 兜底：历史存档里可能仍有 talk_count_ 等英文内部键
+            sk = str(k)
+            if sk.startswith("talk_count_") or sk.startswith("met_") or sk.startswith(
+                "visited_"
+            ):
                 continue
             if is_self:
                 flags_public[k] = v
@@ -129,8 +144,14 @@ class VisibilityService:
         cfg = self._cfg(session)
         public = frozenset(cfg.get("public_world_flags") or ())
         sensitive = frozenset(cfg.get("sensitive_world_flags") or ())
+        # 内部键不进客户端
+        hide = frozenset(
+            {"fired_clues", "map_unlocked", "seal_mountain_noted", "active_encounter"}
+        )
         out: dict[str, Any] = {}
         for k, v in session.world_flags.items():
+            if k in hide or str(k).startswith("_"):
+                continue
             if k in public:
                 out[k] = {"value": v, "greyed": False, "label": k}
                 continue

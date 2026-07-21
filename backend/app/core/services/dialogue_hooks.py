@@ -26,8 +26,6 @@ def merge_dialogue_hard_hooks(
     state_ops = list(adj.state_ops or [])
     belief_ops = list(adj.belief_ops or [])
     world_flag_ops = dict(adj.world_flag_ops or {})
-    notes: list[str] = []
-    narrative = adj.narrative_summary or ""
     changed = False
 
     if registry is None:
@@ -40,9 +38,7 @@ def merge_dialogue_hard_hooks(
             npc_id=npc_id,
             utterance=utterance,
         ) or {}
-        if hook.get("notes"):
-            notes.extend(hook["notes"])
-            changed = True
+        # notes 仅调试，不进玩家叙事
         for ev in hook.get("events") or []:
             events.append(ev)
             changed = True
@@ -64,9 +60,6 @@ def merge_dialogue_hard_hooks(
     except Exception:
         pass
 
-    if notes:
-        narrative = (narrative + " " + " ".join(notes)).strip()
-
     if not changed:
         return adj
     return adj.model_copy(
@@ -75,7 +68,6 @@ def merge_dialogue_hard_hooks(
             "state_ops": state_ops,
             "belief_ops": belief_ops,
             "world_flag_ops": world_flag_ops,
-            "narrative_summary": narrative,
         }
     )
 

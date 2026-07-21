@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.content.luoxia import data as D  # noqa: I001
-from app.core.domain.enums import BeliefSource, EventKind, Severity, TruthRel
+from app.core.domain.enums import EventKind, Severity
 from app.core.domain.models import (
     ActorProfile,
     AuthorityState,
@@ -154,9 +154,7 @@ class LuoxiaWorldPack(WorldPack):
         return bonus
 
     def on_new_game(self, session: Any) -> dict:
-        """开局引导：只回同构包，引擎 apply。"""
-        from app.core.domain.models import BeliefOp
-
+        """开局引导：只回一条事件；全文只此一处，不另写信念/UI 副本。"""
         pid = session.player_id()
         guide = (
             "【客卿须知】你借住落霞宗。每日行动点有限；"
@@ -168,24 +166,13 @@ class LuoxiaWorldPack(WorldPack):
         loc = session.states[pid].location if pid in session.states else None
         return {
             "state_ops": [],
-            "belief_ops": [
-                BeliefOp(
-                    holder_id=pid,
-                    op="upsert",
-                    belief_id="guide_day1",
-                    proposition=guide,
-                    source=BeliefSource.SELF,
-                    truth_rel=TruthRel.MATCHES_AUTHORITY,
-                    confidence=1.0,
-                    day=1,
-                )
-            ],
+            "belief_ops": [],
             "events": [
                 WorldEvent(
                     kind=EventKind.WORLD,
                     severity=Severity.TRIVIAL,
                     title="踏入落霞",
-                    summary=guide,
+                    summary="你以客卿弟子之身，踏入落霞宗外门客居。",
                     actor_ids=[pid],
                     location=loc,
                     day=1,
@@ -201,13 +188,9 @@ class LuoxiaWorldPack(WorldPack):
         }
 
     def on_day_end(self, session: Any) -> dict:
-        from app.content.luoxia import lin_su_shake, shi_mei_arc
-        from app.core.services.content_packet import merge_packets
-
-        return merge_packets(
-            lin_su_shake.sync_shake_packet(session),
-            shi_mei_arc.day_end_packet(session),
-        )
+        # 无强制日终剧本；故事由 NPC/天道共写
+        _ = session
+        return {}
 
     def on_day_rollover(self, session: Any) -> dict:
         """day += 1 之后：倒计时、危机、封山——只回同构包。"""
@@ -244,11 +227,35 @@ class LuoxiaWorldPack(WorldPack):
         npc_id: str,
         utterance: str,
     ) -> dict:
-        if npc_id != "shi_mei":
-            return {}
-        from app.content.luoxia import shi_mei_arc
+        # 不扫台词；只跑条件线索（首次对话等）
+        _ = utterance
+        from app.content.luoxia.clues import collect_trigger_packets
 
-        return shi_mei_arc.advance_on_dialogue(session, utterance=utterance)
+        return collect_trigger_packets(
+            session,
+            kind="talk",
+            player_id=player_id,
+            npc_id=npc_id,
+            location=(session.states.get(player_id).location if session.states.get(player_id) else None),
+        )
+
+    def on_move(
+        self,
+        session: Any,
+        *,
+        player_id: str,
+        from_location: str | None,
+        to_location: str,
+    ) -> dict:
+        from app.content.luoxia.clues import collect_trigger_packets
+
+        return collect_trigger_packets(
+            session,
+            kind="move",
+            player_id=player_id,
+            location=to_location,
+            from_location=from_location,
+        )
 
     def visibility_config(self) -> dict:
         from app.content.luoxia import visibility_cfg
@@ -264,9 +271,9 @@ class LuoxiaWorldPack(WorldPack):
         npc_id: str,
         location: str | None = None,
     ) -> dict:
-        from app.content.luoxia.clues import merge_simulated_clues
+        from app.content.luoxia.clues import inject_clue_packets
 
-        return merge_simulated_clues(
+        return inject_clue_packets(
             session,
             clue_ids,
             player_id=player_id,
@@ -313,16 +320,67 @@ class LuoxiaWorldPack(WorldPack):
 
     def project_session_extra(self, session: Any) -> dict:
         from app.content.luoxia import clue_projection
+        from app.core.services.encounter import project_encounter_view
 
         pid = session.player_id()
-        return {
+        out: dict = {
             "beliefs": [
                 clue_projection.enrich_belief_row(b)
                 for b in session.beliefs.get(pid, [])
             ],
-            "case_lines": clue_projection.project_case_lines(session),
             "clue_flags": clue_projection.project_clue_flags(session),
         }
+        enc = project_encounter_view(session, self)
+        if enc:
+            out["encounter"] = enc
+        return out
+
+    def encounter_move_catalog(self) -> list:
+        from app.content.luoxia import duel_demo
+
+        return duel_demo.move_catalog()
+
+    def encounter_moves_for(self, session: Any, actor_id: str) -> list:
+        from app.content.luoxia import duel_demo
+
+        st = session.states.get(actor_id)
+        inv = list(st.inventory or []) if st else []
+        pid = session.player_id()
+        return duel_demo.moves_for_actor_inventory(
+            inv, foe_fallback=(actor_id != pid)
+        )
+
+    def encounter_ensure_default_art_packet(self, session: Any) -> dict:
+        """开战时若无默认功法则补发（旧存档）。"""
+        from app.content.luoxia import duel_demo
+        from app.core.services.content_packet import empty_packet
+
+        pid = session.player_id()
+        st = session.states.get(pid)
+        if st is None:
+            return {}
+        if duel_demo.inventory_has_art(st.inventory):
+            return {}
+        packet = empty_packet()
+        packet["state_ops"].append(
+            {
+                "actor_id": pid,
+                "op": "add",
+                "path": "inventory",
+                "value": duel_demo.default_art_inventory_item(),
+            }
+        )
+        return packet
+
+    def encounter_qi_cap(self, cultivation: dict) -> int:
+        from app.content.luoxia import duel_demo
+
+        return duel_demo.qi_cap_for(cultivation)
+
+    def encounter_cultivation_amp(self, cultivation: dict) -> float:
+        from app.content.luoxia import duel_demo
+
+        return duel_demo.cultivation_amp(cultivation)
 
     def dynamic_prompt_extra(self, session: Any) -> dict:
         return {}
@@ -342,109 +400,3 @@ class LuoxiaWorldPack(WorldPack):
 
         return tendency.public_tendency_blurb(session, actor_id)
 
-    def mock_reply_override(
-        self,
-        session: Any,
-        *,
-        speaker_id: str,
-        player_utterance: str,
-    ) -> Any | None:
-        from app.content.luoxia import mock_bias
-
-        return mock_bias.mock_reply_override(
-            session, speaker_id=speaker_id, player_utterance=player_utterance
-        )
-
-    def bias_intend_goal(self, session: Any, npc_id: str, goal: str) -> str:
-        from app.content.luoxia import mock_bias
-
-        return mock_bias.bias_intend_goal(session, npc_id, goal)
-
-    def evaluate_ending_tags(self, session: Any) -> list[str]:
-        """
-        只读权威状态/flags 打标签——可扩展，非动画分镜。
-        """
-        tags: list[str] = []
-        flags = session.world_flags or {}
-        countdown = flags.get("xuanyin_countdown")
-        try:
-            cd = int(countdown)
-        except (TypeError, ValueError):
-            cd = None
-
-        if cd == 0 and flags.get("blood_curse_planted"):
-            if flags.get("blood_curse_disarmed"):
-                tags.append("血阴已解")
-            else:
-                tags.append("血阴将爆")
-                tags.append("宗门危局")
-
-        if flags.get("crisis_averted_noted"):
-            tags.append("劫数改写")
-        if flags.get("crisis_fired"):
-            tags.append("护山曾危")
-
-        if flags.get("fake_secret_realm_letter") and flags.get("letter_exposed"):
-            tags.append("假信已揭")
-
-        lin = session.states.get("er_shi_xiong")
-        if lin and not lin.alive:
-            tags.append("林溯已死")
-        elif lin and lin.flags.get("allegiance") == "xuanyin":
-            if lin.flags.get("exposed"):
-                tags.append("内鬼已揭")
-            else:
-                tags.append("内鬼未除")
-
-        yun = session.states.get("da_shi_xiong")
-        if yun and not yun.alive:
-            tags.append("云烨陨落")
-        elif yun and yun.alive:
-            tags.append("云烨仍在")
-
-        luo = session.states.get("shi_mei")
-        if luo and not luo.alive:
-            tags.append("洛晴凶信")
-        elif luo and luo.flags.get("ally_player"):
-            tags.append("洛晴同盟")
-        elif luo and luo.flags.get("arc_shi_mei_partial"):
-            tags.append("得闻遗命")
-        elif luo and luo.flags.get("trusts_player"):
-            tags.append("洛晴托付")
-
-        # 剑髓安宗：破阵不强制剑髓；同盟持髓且已镇压 → 叙事加分标签
-        if (
-            flags.get("blood_curse_disarmed")
-            and luo
-            and luo.alive
-            and (luo.flags.get("ally_player") or luo.flags.get("arc_shi_mei_ally"))
-            and luo.flags.get("holds_luoxia_jian_sui")
-        ):
-            tags.append("剑髓安宗")
-
-        # 站队轻量标签（规格 §6.1）
-        p_st = session.states.get(session.player_id())
-        pflags = dict(p_st.flags or {}) if p_st else {}
-        lin_exposed = bool(lin and lin.flags.get("exposed"))
-        if lin_exposed or pflags.get("faction_lean_yun"):
-            tags.append("站云烨")
-        elif pflags.get("faction_lean_lin") and lin and lin.alive and not lin_exposed:
-            tags.append("站林溯")
-        elif (
-            not flags.get("letter_exposed")
-            and not (luo and (luo.flags.get("ally_player") or luo.flags.get("arc_shi_mei_ally")))
-            and not pflags.get("faction_lean_lin")
-            and not pflags.get("faction_lean_yun")
-        ):
-            tags.append("独善其身")
-
-        su = session.states.get("san_shi_jie")
-        if su and su.flags.get("cursed_backlash"):
-            tags.append("苏婉反噬")
-
-        if flags.get("sect_destroyed"):
-            tags.append("落霞覆灭")
-        elif flags.get("sect_stabilized"):
-            tags.append("宗门暂稳")
-
-        return tags

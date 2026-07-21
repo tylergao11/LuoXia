@@ -47,10 +47,14 @@ class StateApplier:
             self._apply_state_op(session, op)
             new_val = self._peek_state_value(session, op.actor_id, op.path)
             if old_val != new_val:
-                self._append_diff(
-                    session,
-                    f"D{session.day} {op.actor_id}.{op.path}: {old_val!r} -> {new_val!r}",
-                )
+                # 内部书签不进 LLM 差分（否则模型会「接着改 talk_count」）
+                if not str(op.path or "").startswith("flags._") and "talk_count" not in str(
+                    op.path or ""
+                ):
+                    self._append_diff(
+                        session,
+                        f"D{session.day} {op.actor_id}.{op.path}: {old_val!r} -> {new_val!r}",
+                    )
             if before_alive is True:
                 newly_dead.append(op.actor_id)
 
@@ -76,39 +80,15 @@ class StateApplier:
             if not (ev.card_headline or "").strip():
                 ev.card_headline = (ev.title or "旧事").strip() or "旧事"
             if not (ev.card_body or "").strip():
-                body = (ev.summary or "").strip()
-                if result.narrative_summary and result.narrative_summary not in body:
-                    body = (body + "\n\n" + result.narrative_summary).strip()
-                ev.card_body = body or ev.card_headline
+                ev.card_body = (ev.summary or ev.card_headline or "").strip()
+            # 事件卡只承载本事件叙事；剥离误写入的整轮局势块（旧路径污染）
+            if "——局势——" in (ev.card_body or ""):
+                ev.card_body = (ev.card_body or "").split("——局势——")[0].strip()
             if not (ev.summary or "").strip():
                 ev.summary = (ev.card_body or ev.card_headline)[:120]
-            # 把状态变化写进卡面，列表上就能看见
-            try:
-                from app.core.services.effect_summary import summarize_adjudication
-
-                focus = None
-                for aid in ev.actor_ids or []:
-                    if aid != session.player_id():
-                        focus = aid
-                        break
-                effects = summarize_adjudication(session, result, focus_other_id=focus)
-                fx = effects.get("full_text") or ""
-                if fx and fx not in (ev.card_body or ""):
-                    ev.card_body = ((ev.card_body or "").rstrip() + "\n\n——局势——\n" + fx).strip()
-                # summary 也带一行己身/对方，免得点开
-                bits = []
-                if effects.get("self_lines"):
-                    bits.append("己身：" + "；".join(effects["self_lines"][:2]))
-                if effects.get("other_lines") and effects.get("other_name"):
-                    bits.append(
-                        f"{effects['other_name']}：" + "；".join(effects["other_lines"][:2])
-                    )
-                if bits:
-                    tip = " / ".join(bits)
-                    if tip not in (ev.summary or ""):
-                        ev.summary = ((ev.summary or "").rstrip("。") + "。" + tip)[:160]
-            except Exception:
-                pass
+            elif "——局势——" in (ev.summary or ""):
+                ev.summary = (ev.summary or "").split("——局势——")[0].strip()[:120]
+            # 可选：挂 belief_ids 引用，不复述命题
             session.events.append(ev)
             new_events.append(ev)
 
@@ -163,29 +143,92 @@ class StateApplier:
         if state is None:
             return
         data = state.model_dump()
+        path = op.path or ""
         if op.op == "set":
-            self._set_path(data, op.path, op.value)
+            # 单件 dict 误写成 set inventory → 当作增物，避免整表被盖成一件
+            if path == "inventory" and isinstance(op.value, dict):
+                self._inventory_add(data, op.value)
+            else:
+                self._set_path(data, path, op.value)
         elif op.op == "add":
-            cur = self._get_path(data, op.path)
-            if cur is None:
-                cur = 0
-            if isinstance(cur, (int, float)) and isinstance(op.value, (int, float)):
-                self._set_path(data, op.path, cur + op.value)
+            if path == "inventory" or path.endswith(".inventory"):
+                val = op.value
+                if isinstance(val, list):
+                    for it in val:
+                        if isinstance(it, dict):
+                            self._inventory_add(data, it)
+                elif isinstance(val, dict):
+                    self._inventory_add(data, val)
+            else:
+                cur = self._get_path(data, path)
+                if cur is None:
+                    cur = 0
+                if isinstance(cur, (int, float)) and isinstance(op.value, (int, float)):
+                    self._set_path(data, path, cur + op.value)
         elif op.op == "delete_key":
-            self._delete_path(data, op.path)
+            self._delete_path(data, path)
         elif op.op == "remove":
-            # inventory 按 item_id 删
-            inv = data.get("inventory") or []
-            if isinstance(inv, list) and isinstance(op.value, dict):
-                item_id = op.value.get("item_id")
-                data["inventory"] = [
-                    x for x in inv if not (isinstance(x, dict) and x.get("item_id") == item_id)
-                ]
+            # inventory 按 item_id 删；亦可减 qty
+            if path == "inventory" or path.endswith(".inventory"):
+                self._inventory_remove(data, op.value)
+            else:
+                inv = data.get("inventory") or []
+                if isinstance(inv, list) and isinstance(op.value, dict):
+                    item_id = op.value.get("item_id")
+                    data["inventory"] = [
+                        x
+                        for x in inv
+                        if not (isinstance(x, dict) and x.get("item_id") == item_id)
+                    ]
         data["updated_day"] = session.day
         # re-validate
         from app.core.domain.models import AuthorityState
 
         session.states[op.actor_id] = AuthorityState.model_validate(data)
+
+    @staticmethod
+    def _inventory_add(data: dict[str, Any], item: dict[str, Any]) -> None:
+        inv = list(data.get("inventory") or [])
+        iid = item.get("item_id")
+        qty_add = int(item.get("qty") or 1)
+        name = item.get("name") or iid or "异物"
+        if iid:
+            for existing in inv:
+                if isinstance(existing, dict) and existing.get("item_id") == iid:
+                    existing["qty"] = int(existing.get("qty") or 1) + qty_add
+                    if item.get("name"):
+                        existing["name"] = item["name"]
+                    data["inventory"] = inv
+                    return
+        row = {"item_id": iid or f"item_{len(inv)+1}", "name": name, "qty": qty_add}
+        for k, v in item.items():
+            if k not in row:
+                row[k] = v
+        inv.append(row)
+        data["inventory"] = inv
+
+    @staticmethod
+    def _inventory_remove(data: dict[str, Any], value: Any) -> None:
+        inv = list(data.get("inventory") or [])
+        if not isinstance(value, dict):
+            return
+        item_id = value.get("item_id")
+        if not item_id:
+            return
+        qty_rm = value.get("qty")
+        next_inv: list[dict[str, Any]] = []
+        for x in inv:
+            if not isinstance(x, dict) or x.get("item_id") != item_id:
+                next_inv.append(x)
+                continue
+            if qty_rm is None:
+                continue  # 整件移除
+            left = int(x.get("qty") or 1) - int(qty_rm)
+            if left > 0:
+                x = dict(x)
+                x["qty"] = left
+                next_inv.append(x)
+        data["inventory"] = next_inv
 
     def _apply_belief_op(
         self, session: GameSession, bop: BeliefOp, *, default_day: int

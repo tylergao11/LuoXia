@@ -29,6 +29,38 @@ def split_digest_for_prompt(digest: str) -> tuple[str, str]:
     return d[:MEMORY_DIGEST_PREFIX_CHARS], d[MEMORY_DIGEST_PREFIX_CHARS:]
 
 
+def _is_engine_internal_flag(key: str) -> bool:
+    """引擎书签/计数：不进 LLM DYNAMIC，避免模型「接着改」成玩家可见旗。"""
+    k = str(key or "")
+    if k.startswith("_"):
+        return True
+    low = k.lower()
+    if low.startswith("talk_count") or "_talk_count" in low:
+        return True
+    if low.startswith("met_") or low.startswith("visited_") or low.startswith("sim_"):
+        return True
+    return False
+
+
+def _is_engine_internal_path(path: str) -> bool:
+    p = str(path or "")
+    if not p:
+        return True
+    if p.startswith("flags."):
+        return _is_engine_internal_flag(p.split(".", 1)[-1])
+    return _is_engine_internal_flag(p)
+
+
+def _diff_line_is_internal(line: str) -> bool:
+    """差分里带 _talk_count / flags._* 的行不喂给模型。"""
+    s = str(line or "")
+    if "._talk_count" in s or ".flags._" in s:
+        return True
+    if "talk_count_" in s or "flags._met_" in s or "flags._visited_" in s:
+        return True
+    return False
+
+
 def compact_state(st: Any) -> dict[str, Any]:
     if st is None:
         return {}
@@ -39,8 +71,12 @@ def compact_state(st: Any) -> dict[str, Any]:
     else:
         return {}
     flags = d.get("flags") or {}
-    # memory_digest 走 MEMORY/溢出区，避免 DYNAMIC.flags 重复携带
-    flags_out = {k: v for k, v in flags.items() if k != "memory_digest"}
+    # memory_digest 走 MEMORY；引擎内部 flags 不进 DYNAMIC
+    flags_out = {
+        k: v
+        for k, v in flags.items()
+        if k != "memory_digest" and not _is_engine_internal_flag(str(k))
+    }
     return {
         "alive": d.get("alive", True),
         "location": d.get("location"),
@@ -181,8 +217,12 @@ def dynamic_turn_block(
                 if overflow:
                     digest_overflow[aid] = overflow
         beliefs[aid] = compact_beliefs(session, aid, 8)
-    # 差分日志（只增）；滑窗仅影响 DYNAMIC，不碰 MEMORY 前缀
-    diff_log = list(session.graph_meta.get("llm_state_diff_log") or [])[-30:]
+    # 差分日志（只增）；滑窗仅影响 DYNAMIC；内部计数行不喂模型
+    diff_log = [
+        x
+        for x in (session.graph_meta.get("llm_state_diff_log") or [])[-40:]
+        if not _diff_line_is_internal(str(x))
+    ][-30:]
     mem_log = list(session.graph_meta.get("llm_memory_log") or [])
     mem_log_overflow = mem_log[MEMORY_LOG_PREFIX_N:]
     payload: dict[str, Any] = {

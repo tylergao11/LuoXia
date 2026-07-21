@@ -33,9 +33,9 @@ if (-not (Test-Path $envFile)) {
     Write-Host "已生成 backend/.env（默认 Ollama qwen3:8b）" -ForegroundColor Green
 }
 
-Write-Host "启动 API :8000 与前端 :5173 ..." -ForegroundColor Cyan
+Write-Host "启动 API :8002 与前端 :5173 ..." -ForegroundColor Cyan
 Start-Process -FilePath (Join-Path $Backend ".venv\Scripts\uvicorn.exe") `
-    -ArgumentList "app.main:app","--reload","--port","8000" `
+    -ArgumentList "app.main:app","--reload","--host","127.0.0.1","--port","8002" `
     -WorkingDirectory $Backend
 
 if (-not (Test-Path (Join-Path $Frontend "node_modules"))) {

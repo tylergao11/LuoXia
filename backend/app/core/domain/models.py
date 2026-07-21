@@ -149,12 +149,14 @@ class GameSession(BaseModel):
     rules: WorldRules = Field(default_factory=WorldRules)
     world_flags: dict[str, Any] = Field(default_factory=dict)
     background_text: str = ""
-    ending_tags: list[str] = Field(default_factory=list)
     game_over_reason: str | None = None
     # 日终演变断点（进程崩溃后可续跑）
     evolve_queue: list[str] = Field(default_factory=list)
     evolve_index: int = 0
-    # LangGraph thread 辅助元数据
+    # 真相字典·对白：按 actor 分仓；仅「说了什么」+ 事件封条引用 + 机械局势脚注
+    # 见闻/天下/履历叙事不在此写——那些在 beliefs / world_flags / events
+    dialogue: dict[str, Any] = Field(default_factory=dict)
+    # LangGraph / LLM 缓存草稿（非玩家真相）
     graph_meta: dict[str, Any] = Field(default_factory=dict)
 
     def player_id(self) -> ActorId:
@@ -223,7 +225,6 @@ class AdjudicationResult(BaseModel):
     """世界级 flags 补丁（非角色状态）。"""
     world_flag_ops: dict[str, Any] = Field(default_factory=dict)
     ui_hints: dict[str, Any] = Field(default_factory=dict)
-    # 线索落地只认 events/ops；不再保留平行 unlocked_clues 字段
 
 
 class NpcReply(BaseModel):

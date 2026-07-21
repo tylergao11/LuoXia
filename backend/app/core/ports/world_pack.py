@@ -79,10 +79,6 @@ class WorldPack(ABC):
         """
         return {}
 
-    def evaluate_ending_tags(self, session: "GameSession") -> list[str]:
-        """世界包结局标签（读权威状态/flags，勿在引擎写死剧情）。"""
-        return []
-
     def on_new_game(self, session: "GameSession") -> dict:
         """
         开局钩子：只返回同构 ContentPacket，由引擎 StateApplier 落地。
@@ -107,10 +103,21 @@ class WorldPack(ABC):
         utterance: str,
     ) -> dict:
         """
-        对话后内容钩子（可选）。
-        返回同构包 {notes?, events?, state_ops?, belief_ops?, world_flag_ops?}；
-        引擎合并进 AdjudicationResult，经 StateApplier 落地——禁止直改 session。
+        对话后内容钩子：条件线索等固定包。
+        返回同构包；引擎合并进 AdjudicationResult → StateApplier。
+        禁止直改 session；禁止按台词关键词推进。
         """
+        return {}
+
+    def on_move(
+        self,
+        session: "GameSession",
+        *,
+        player_id: str,
+        from_location: str | None,
+        to_location: str,
+    ) -> dict:
+        """移动成功后：条件线索（首次抵达等）固定包。"""
         return {}
 
     def visibility_config(self) -> dict:
@@ -126,7 +133,7 @@ class WorldPack(ABC):
         npc_id: str,
         location: str | None = None,
     ) -> dict:
-        """Mock/测试：线索 id → 同构包。默认空。"""
+        """按线索 id 合并同构包（调试/工具用）。默认空。"""
         return {
             "state_ops": [],
             "belief_ops": [],
@@ -166,11 +173,31 @@ class WorldPack(ABC):
 
     def project_session_extra(self, session: "GameSession") -> dict:
         """
-        客户端知识投影（见闻分类 / 案线 / 灰字等）。
-        返回 {beliefs?, case_lines?, clue_flags?}；空则 api 用默认信念列表。
-        Web 与未来 3D 共用此 DTO，禁止在视图层写剧情。
+        客户端知识投影（见闻分类 / 隐情灰字 / 交锋 DTO 等）。
+        返回 {beliefs?, clue_flags?, encounter?}；空则 api 用默认。
         """
         return {}
+
+    def encounter_move_catalog(self) -> list[dict]:
+        """交锋可选小招表（兼容）；优先用 encounter_moves_for。"""
+        return []
+
+    def encounter_moves_for(self, session: "GameSession", actor_id: str) -> list[dict]:
+        """按持有功法解析小招；无功法时玩家空表、NPC 可回落底库。"""
+        return []
+
+    def encounter_qi_cap(self, cultivation: dict) -> int:
+        """境界 → 本场气上限。"""
+        return 5
+
+    def encounter_cultivation_amp(self, cultivation: dict) -> float:
+        """修为线性放大系数（有效值乘数）。"""
+        layer = 0
+        try:
+            layer = int((cultivation or {}).get("layer") or 0)
+        except (TypeError, ValueError):
+            layer = 0
+        return 1.0 + max(0, layer) * 0.08
 
     def dynamic_prompt_extra(self, session: "GameSession") -> dict[str, Any]:
         """LLM DYNAMIC 附加（倾向摘要等）。"""
@@ -186,19 +213,3 @@ class WorldPack(ABC):
 
     def public_tendency_blurb(self, session: "GameSession", actor_id: str) -> str:
         return ""
-
-    def mock_reply_override(
-        self,
-        session: "GameSession",
-        *,
-        speaker_id: str,
-        player_utterance: str,
-    ) -> Any | None:
-        """Mock 心智：内容包可返回 NpcReply 覆盖；默认 None。"""
-        return None
-
-    def bias_intend_goal(
-        self, session: "GameSession", npc_id: str, goal: str
-    ) -> str:
-        """Mock/规则意图：内容包可改写 goal_summary。"""
-        return goal

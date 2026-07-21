@@ -9,7 +9,6 @@ from app.core.graphs.world_evolve import WorldEvolveStepper
 from app.core.ports.adjudicator import AdjudicatorPort
 from app.core.ports.agent_mind import AgentMindPort
 from app.core.ports.repository import SessionRepositoryPort
-from app.core.services.ending import EndingService
 from app.core.services.state_applier import StateApplier
 from app.core.services.world_registry import WorldRegistry
 
@@ -77,7 +76,7 @@ class ActionService:
         ):
             result = self._end_day(session, resume=True)
             if result.session:
-                self._maybe_finalize_ending(result.session)
+                self._maybe_settle(result.session)
                 self.repo.save(result.session)
             return result
 
@@ -95,18 +94,40 @@ class ActionService:
             result = self._talk(session, req)
         elif at == ActionType.END_DAY.value:
             result = self._end_day(session, resume=False)
+        elif at == ActionType.ENCOUNTER.value or at == "encounter":
+            result = self._encounter(session, req)
         else:
             result = self._custom_via_tiandao(session, req)
 
         if result.session:
-            self._maybe_finalize_ending(result.session)
+            self._maybe_settle(result.session)
             self.repo.save(result.session)
         return result
 
-    def _maybe_finalize_ending(self, session: GameSession) -> None:
-        if session.phase in (GamePhase.GAME_OVER, GamePhase.MONTH_END):
+    def _encounter(self, session: GameSession, req: ActionRequest) -> ActionResult:
+        from app.core.services.encounter import handle_encounter
+
+        try:
             pack = self.registry.get(session.world_id)
-            EndingService().finalize(session, pack, reason=session.game_over_reason)
+        except Exception:
+            return ActionResult(
+                ok=False,
+                message="世界包不可用",
+                session=session,
+                error_code="NO_PACK",
+            )
+        return handle_encounter(session, req, pack, self.applier)
+
+    def _maybe_settle(self, session: GameSession) -> None:
+        if session.phase in (GamePhase.GAME_OVER, GamePhase.MONTH_END):
+            from app.core.services.settlement import settle_if_needed
+
+            settle_if_needed(
+                session,
+                self.adjudicator,
+                self.applier,
+                reason=session.game_over_reason,
+            )
 
     def _move(self, session: GameSession, req: ActionRequest) -> ActionResult:
         pid = session.player_id()
@@ -142,9 +163,28 @@ class ActionService:
                 ok=False, message="行动点不足", session=session, error_code="NO_AP"
             )
 
+        from_loc = cur
         st.location = dest
         st.updated_day = session.day
         session.ap -= cost
+        # 条件线索：首次抵达等固定包
+        try:
+            pack = self.registry.get(session.world_id)
+            from app.core.services.content_packet import apply_packet
+
+            apply_packet(
+                session,
+                pack.on_move(
+                    session,
+                    player_id=pid,
+                    from_location=from_loc,
+                    to_location=dest,
+                )
+                or {},
+                applier=self.applier,
+            )
+        except Exception:
+            pass
         self.repo.save(session)
         msg = f"前往{session.map.nodes[dest].name}"
         if session.ap <= 0:
@@ -174,23 +214,13 @@ class ActionService:
             )
 
         self.repo.save(session)
-        # Mock/测试：payload.simulate_clues → 天道同构事件包；simulate_intents → 行动意图
-        sim: list[str] = []
-        intents: list[str] = []
+        # 通告内容可选经 payload 传入（真实意图，非 Mock）
         if isinstance(req.payload, dict):
-            raw = req.payload.get("simulate_clues") or req.payload.get("unlocked_clues") or []
-            if isinstance(raw, list):
-                sim = [str(x) for x in raw]
-            raw_i = req.payload.get("simulate_intents") or req.payload.get("intents") or []
-            if isinstance(raw_i, list):
-                intents = [str(x) for x in raw_i]
             proc = req.payload.get("proclamation_content")
             if proc is not None:
                 session.graph_meta["_talk_proclamation_content"] = str(proc)
             else:
                 session.graph_meta.pop("_talk_proclamation_content", None)
-        session.graph_meta["_talk_simulate_clues"] = sim
-        session.graph_meta["_talk_simulate_intents"] = intents
         self.repo.save(session)
         cfg = None
         if self._checkpointer is not None:
@@ -226,7 +256,7 @@ class ActionService:
         assert session is not None
         narrative = out.get("narrative") or "对话已裁决"
         npc_line = out.get("npc_utterance") or None
-        effects = dict(session.graph_meta.get("last_effects") or {})
+        effects = dict(session.graph_meta.pop("last_effects", None) or {})
         raw_new = session.graph_meta.pop("last_new_events", None) or []
         new_events: list[WorldEvent] = []
         for x in raw_new:

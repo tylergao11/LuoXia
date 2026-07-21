@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.schemas import ActionBody, CreateGameBody
 from app.api.views import to_session_view
@@ -21,6 +24,7 @@ logging.getLogger("luoxia.llm").setLevel(logging.INFO)
 logging.getLogger("luoxia.llm.cache").setLevel(logging.INFO)
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,7 +62,8 @@ def health():
         "llm_mode": c.llm_mode,
         "llm_model": settings.llm_model,
         "llm_base_url": settings.llm_base_url,
-        "use_llm": settings.use_llm,
+        "use_llm": True,
+        "llm_required": True,
         "llm_think": settings.llm_think,
         "llm_provider": (
             "deepseek"
@@ -136,6 +141,8 @@ def post_action(session_id: str, body: ActionBody):
 
 @app.get("/")
 def root():
+    if FRONTEND_DIST.is_dir():
+        return FileResponse(FRONTEND_DIST / "index.html")
     return {
         "name": settings.app_name,
         "docs": "/docs",
@@ -145,3 +152,7 @@ def root():
             "infra": "repo / adjudicator / mind adapters",
         },
     }
+
+
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")

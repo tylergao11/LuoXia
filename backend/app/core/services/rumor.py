@@ -4,18 +4,14 @@ import hashlib
 from uuid import uuid4
 
 from app.core.domain.enums import BeliefSource, EventKind, Severity, TruthRel
-from app.core.domain.models import Belief, GameSession, WorldEvent
+from app.core.domain.models import BeliefOp, GameSession, WorldEvent
+from app.core.services.content_packet import apply_packet, empty_packet
 
 
 class RumorPass:
     """
     日终传谣：延迟 + 跳数上限 + 随跳数失真增强。
-
-    规则（通用）：
-    - 见闻需 planted_day 后至少 delay_days 天才可传
-    - hop >= max_hops 不再传
-    - 传出后 next_spread_day = day + cooldown
-    - 失真随 hop 增加（前缀/截断，不维护词替换表）
+    产出同构包 → apply_packet，不直写 session.beliefs / events。
     """
 
     def __init__(
@@ -32,7 +28,7 @@ class RumorPass:
         self.cooldown_days = cooldown_days
 
     def run(self, session: GameSession) -> list[WorldEvent]:
-        events: list[WorldEvent] = []
+        packet = empty_packet()
         spreads = 0
         by_loc: dict[str, list[str]] = {}
         for aid, st in session.states.items():
@@ -60,9 +56,9 @@ class RumorPass:
                 if not receivers:
                     continue
                 h = int(
-                    hashlib.md5(f"{session.day}:{sp}:{loc}:{seed.belief_id}".encode()).hexdigest()[
-                        :8
-                    ],
+                    hashlib.md5(
+                        f"{session.day}:{sp}:{loc}:{seed.belief_id}".encode()
+                    ).hexdigest()[:8],
                     16,
                 )
                 recv = receivers[h % len(receivers)]
@@ -76,32 +72,21 @@ class RumorPass:
                 if distorted in existing:
                     continue
 
-                # 标记源信念冷却
-                seed.next_spread_day = session.day + self.cooldown_days
-                if seed.planted_day is None:
-                    seed.planted_day = seed.day
-
-                b = Belief(
-                    belief_id=f"rumor_{sp}_{recv}_d{session.day}_{uuid4().hex[:6]}",
-                    holder_id=recv,
-                    proposition=distorted,
-                    source=BeliefSource.RUMOR,
-                    source_detail=sp,
-                    truth_rel=TruthRel.UNKNOWN_TO_AUTHORITY,
-                    confidence=max(0.15, (seed.confidence or 0.5) * (0.75**new_hop)),
-                    day=session.day,
-                    planted_day=session.day,
-                    hop=new_hop,
-                    next_spread_day=session.day + self.cooldown_days,
+                # 接收方新见闻 + 场面事件（源信念冷却在 apply 后戳元数据）
+                new_bid = f"rumor_{sp}_{recv}_d{session.day}_{uuid4().hex[:6]}"
+                packet["belief_ops"].append(
+                    BeliefOp(
+                        holder_id=recv,
+                        op="upsert",
+                        belief_id=new_bid,
+                        proposition=distorted,
+                        source=BeliefSource.RUMOR,
+                        source_detail=sp,
+                        truth_rel=TruthRel.UNKNOWN_TO_AUTHORITY,
+                        confidence=max(0.15, (seed.confidence or 0.5) * (0.75**new_hop)),
+                        day=session.day,
+                    )
                 )
-                session.beliefs.setdefault(recv, []).append(b)
-
-                # 写回更新后的 seed（冷却）
-                blist = session.beliefs.get(sp) or []
-                for i, old in enumerate(blist):
-                    if old.belief_id == seed.belief_id:
-                        blist[i] = seed
-                        break
 
                 sp_name = (
                     session.profiles[sp].display_name if sp in session.profiles else sp
@@ -114,25 +99,67 @@ class RumorPass:
                 loc_name = (
                     session.map.nodes[loc].name if loc in session.map.nodes else loc
                 )
-                ev = WorldEvent(
-                    kind=EventKind.RUMOR,
-                    severity=Severity.TRIVIAL if new_hop < 2 else Severity.MINOR,
-                    title=f"传语·{loc_name}",
-                    summary=f"{sp_name}向{recv_name}传了一句闲话（第{new_hop}跳）。",
-                    actor_ids=[sp, recv],
-                    location=loc,
-                    day=session.day,
-                    known_to=[sp, recv],
-                    card_headline="闲话",
-                    card_body=distorted,
-                    involves_player=session.player_id() in (sp, recv),
-                    tags=["rumor_pass", "auto", f"hop_{new_hop}"],
-                    meta={"hop": new_hop, "from_belief": seed.belief_id},
+                packet["events"].append(
+                    WorldEvent(
+                        kind=EventKind.RUMOR,
+                        severity=Severity.TRIVIAL if new_hop < 2 else Severity.MINOR,
+                        title=f"传语·{loc_name}",
+                        summary=f"{sp_name}向{recv_name}传了一句闲话（第{new_hop}跳）。",
+                        actor_ids=[sp, recv],
+                        location=loc,
+                        day=session.day,
+                        known_to=[sp, recv],
+                        card_headline="闲话",
+                        card_body=distorted,
+                        involves_player=session.player_id() in (sp, recv),
+                        tags=["rumor_pass", "auto", f"hop_{new_hop}"],
+                        meta={
+                            "hop": new_hop,
+                            "from_belief": seed.belief_id,
+                            "belief_ids": [new_bid],
+                            "rumor_seed_id": seed.belief_id,
+                            "rumor_seed_holder": sp,
+                            "rumor_cooldown_day": session.day + self.cooldown_days,
+                            "rumor_hop": new_hop,
+                        },
+                    )
                 )
-                session.events.append(ev)
-                events.append(ev)
                 spreads += 1
-        return events
+
+        created = apply_packet(session, packet)
+        self._stamp_rumor_meta(session, packet)
+        return created
+
+    def _stamp_rumor_meta(self, session: GameSession, packet: dict) -> None:
+        for ev in packet.get("events") or []:
+            meta = getattr(ev, "meta", None) or {}
+            if not isinstance(meta, dict):
+                continue
+            hop = int(meta.get("rumor_hop") or meta.get("hop") or 0)
+            cool = meta.get("rumor_cooldown_day")
+            cool_i = int(cool) if cool is not None else session.day + self.cooldown_days
+            seed_id = meta.get("rumor_seed_id") or meta.get("from_belief")
+            seed_holder = meta.get("rumor_seed_holder")
+            for bid in meta.get("belief_ids") or []:
+                for blist in (session.beliefs or {}).values():
+                    for b in blist:
+                        if b.belief_id == bid:
+                            b.hop = hop
+                            b.planted_day = session.day
+                            b.next_spread_day = cool_i
+            if seed_id:
+                holders = (
+                    [seed_holder]
+                    if seed_holder
+                    else list((session.beliefs or {}).keys())
+                )
+                for holder in holders:
+                    for b in session.beliefs.get(holder) or []:
+                        if b.belief_id == seed_id:
+                            b.next_spread_day = cool_i
+                            if b.planted_day is None:
+                                b.planted_day = b.day
+                            break
 
     def _is_spreader(self, session: GameSession, actor_id: str) -> bool:
         prof = session.profiles.get(actor_id)
@@ -145,9 +172,9 @@ class RumorPass:
             return True
         return False
 
-    def _pick_belief(
-        self, session: GameSession, actor_id: str, day: int
-    ) -> Belief | None:
+    def _pick_belief(self, session: GameSession, actor_id: str, day: int):
+        from app.core.domain.models import Belief
+
         beliefs = list(session.beliefs.get(actor_id) or [])
         if not beliefs:
             return None
@@ -173,7 +200,6 @@ class RumorPass:
         return candidates[0]
 
     def _distort(self, text: str, *, salt: int, hop: int) -> str:
-        """跳数失真：听说/有人说前缀 + 截断，不扫词替换表。"""
         _ = salt
         out = (text or "").strip()
         if hop >= 1 and not out.startswith("听说") and not out.startswith("有人说"):

@@ -10,7 +10,7 @@ class AdjudicatorPort(ABC):
     """
     天道端口：对权威状态有最终解释权。
 
-    实现可替换：Mock / LLM / 规则混合 / 未来多模型路由。
+    实现：LLM 天道（产品路径必须可用）。
     """
 
     @abstractmethod

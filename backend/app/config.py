@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     # LLM：默认 DeepSeek（OpenAI 兼容）；本地可改回 Ollama
     llm_api_key: str = "ollama"
     llm_base_url: str = "https://api.deepseek.com/v1"
-    llm_model: str = "deepseek-chat"
+    llm_model: str = "deepseek-v4-flash"
+    # 必须为 true；false 也不会再走任何非 LLM 玩法兜底
     use_llm: bool = True
-    allow_scripted_ports: bool = False
     # 速度：关思考、限生成、探活缓存、并行意图
     llm_think: bool = False
     llm_timeout: float = 90.0

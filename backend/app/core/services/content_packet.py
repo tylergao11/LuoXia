@@ -20,13 +20,12 @@ def empty_packet() -> dict[str, Any]:
         "belief_ops": [],
         "events": [],
         "world_flag_ops": {},
-        "notes": [],
-        "narrative_summary": "",
+        "notes": [],  # 引擎/调试备注，不进玩家叙事
     }
 
 
 def merge_packets(*parts: dict[str, Any] | None) -> dict[str, Any]:
-    """合并多包；map_unlocked 列表做有序并集。"""
+    """合并多包；map_unlocked 列表做有序并集。narrative_summary 不进硬产出。"""
     out = empty_packet()
     for p in parts:
         if not p:
@@ -36,13 +35,6 @@ def merge_packets(*parts: dict[str, Any] | None) -> dict[str, Any]:
         out["events"].extend(p.get("events") or [])
         if p.get("notes"):
             out["notes"].extend(p["notes"] if isinstance(p["notes"], list) else [p["notes"]])
-        ns = p.get("narrative_summary") or ""
-        if ns:
-            out["narrative_summary"] = (
-                (out["narrative_summary"] + " " + ns).strip()
-                if out["narrative_summary"]
-                else ns
-            )
         for k, v in (p.get("world_flag_ops") or {}).items():
             if k == "map_unlocked" and isinstance(v, list):
                 prev = out["world_flag_ops"].get("map_unlocked")
@@ -70,8 +62,6 @@ def packet_nonempty(packet: dict[str, Any] | None) -> bool:
         or packet.get("belief_ops")
         or packet.get("world_flag_ops")
         or packet.get("events")
-        or packet.get("notes")
-        or (packet.get("narrative_summary") or "").strip()
     )
 
 
@@ -98,13 +88,9 @@ def packet_to_result(packet: dict[str, Any] | AdjudicationResult | None) -> Adju
             events.append(ev)
         elif isinstance(ev, dict):
             events.append(WorldEvent.model_validate(ev))
-    narrative = str(packet.get("narrative_summary") or "")
-    notes = packet.get("notes") or []
-    if notes:
-        extra = " ".join(str(n) for n in notes if n)
-        narrative = (narrative + " " + extra).strip() if narrative else extra
+    # notes / narrative_summary：管道草稿，不落地为玩家真相
     return AdjudicationResult(
-        narrative_summary=narrative,
+        narrative_summary="",
         state_ops=state_ops,
         belief_ops=belief_ops,
         world_flag_ops=dict(packet.get("world_flag_ops") or {}),
@@ -129,7 +115,6 @@ def apply_packet(
         and not result.belief_ops
         and not result.world_flag_ops
         and not result.events
-        and not (result.narrative_summary or "").strip()
     ):
         return []
     return (applier or StateApplier()).apply(session, result)

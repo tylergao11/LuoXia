@@ -14,14 +14,14 @@
 backend/app/
   core/      领域 · 端口 · 服务 · 图
   content/   luoxia · qingxi · …
-  infra/     存档 · Mock/LLM
+  infra/     存档 · LLM（无模型不准玩）
   api/       HTTP DTO（可换 3D 网关）
 frontend/    Web 试玩壳
 ```
 
 ## 本地启动
 
-推荐本机 Ollama **`qwen3:8b`**。
+**必须先有可用 LLM**（Ollama / DeepSeek 等），否则后端拒绝启动，**没有脚本/Mock 兜底**。
 
 ```powershell
 # 可选一键
@@ -31,7 +31,7 @@ powershell -File scripts/run_local.ps1
 手动：
 
 ```powershell
-# 终端 1：模型
+# 终端 1：模型（若用 Ollama）
 ollama serve
 
 # 终端 2：API
@@ -39,7 +39,7 @@ cd backend
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env   # USE_LLM + Ollama 默认
+copy .env.example .env   # 填好 LLM_*
 uvicorn app.main:app --reload --port 8000
 
 # 终端 3：前端
@@ -49,16 +49,6 @@ npm run dev
 ```
 
 打开 http://localhost:5173  
-
-### Mock（不调模型）
-
-`backend/.env`：
-
-```env
-USE_LLM=false
-```
-
-### LLM（Ollama）
 
 ```env
 USE_LLM=true

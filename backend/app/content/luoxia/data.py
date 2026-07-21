@@ -195,7 +195,18 @@ STATE_SEEDS = {
         "identity": {"sect_role": "guest_disciple", "title": "客卿弟子"},
         "cultivation": {"realm": "炼气", "layer": 3},
         "resources": {"spirit_stones": 30},
-        "inventory": [{"item_id": "token_guest", "name": "客卿令", "qty": 1}],
+        "inventory": [
+            {"item_id": "token_guest", "name": "客卿令", "qty": 1},
+            {
+                "item_id": "art_guest_breath",
+                "name": "客途吐纳诀",
+                "qty": 1,
+                "kind": "gongfa",
+                "art_id": "art_guest_breath",
+                "lore": "外门客卿自携的粗浅吐纳，攻守尚可，难登大雅。",
+                "tags": ["strike", "guard", "break", "bind"],
+            },
+        ],
     },
     "da_shi_xiong": {
         "location": "square",

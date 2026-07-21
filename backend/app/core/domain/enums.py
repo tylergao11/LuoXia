@@ -54,4 +54,5 @@ class ActionType(str, Enum):
     TALK = "talk"
     MOVE = "move"
     END_DAY = "end_day"
+    ENCOUNTER = "encounter"
     CUSTOM = "custom"

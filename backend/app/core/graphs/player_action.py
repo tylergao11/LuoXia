@@ -34,8 +34,8 @@ def build_player_action_graph(
 ):
     """
     LLM：build_context → dialogue_turn（1×LLM）→ persist
-    Mock：无 dialogue_turn → npc_reply + tiandao → persist
-    registry 由 ActionService 注入，禁止 core 反查 container。
+    有 dialogue_turn 则单次完成；否则 reply + adjudicate。
+    registry 由 ActionService 注入。
     """
     applier = applier or StateApplier()
 
@@ -49,7 +49,7 @@ def build_player_action_graph(
         return {"error": "", "player_id": session.player_id()}
 
     def dialogue_turn_node(state: PlayerActionState) -> dict[str, Any]:
-        """有 dialogue_turn 则单次完成；Mock 无此方法则走双步。"""
+        """有 dialogue_turn 则单次完成；否则走双步。"""
         if state.get("error"):
             return {}
         session = repo.get(state["session_id"])
@@ -78,8 +78,6 @@ def build_player_action_graph(
             "npc_wants_action": reply.wants_action,
             "npc_intent_tags": list(reply.intent_tags or []),
             "fast_path": True,
-            "simulate_clues": list(session.graph_meta.get("_talk_simulate_clues") or []),
-            "simulate_intents": list(session.graph_meta.get("_talk_simulate_intents") or []),
             "proclamation_content": session.graph_meta.get("_talk_proclamation_content"),
         }
         session.graph_meta["_talk_adj"] = adj.model_dump(mode="json")
@@ -122,8 +120,6 @@ def build_player_action_graph(
             "npc_engagement": reply.engagement,
             "npc_wants_action": reply.wants_action,
             "npc_intent_tags": list(reply.intent_tags or []),
-            "simulate_clues": list(session.graph_meta.get("_talk_simulate_clues") or []),
-            "simulate_intents": list(session.graph_meta.get("_talk_simulate_intents") or []),
             "proclamation_content": session.graph_meta.get("_talk_proclamation_content"),
         }
         repo.save(session)
@@ -168,7 +164,7 @@ def build_player_action_graph(
         raw = session.graph_meta.get("_talk_adj") or {}
         adj = AdjudicationResult.model_validate(raw)
 
-        # 硬状态钩子：内容包 / 地图解锁（Mock 与 LLM 统一）；registry 由构图闭包注入
+        # 硬状态钩子：内容包条件线索等；registry 由构图闭包注入
         adj = merge_dialogue_hard_hooks(
             session,
             adj,
@@ -190,15 +186,25 @@ def build_player_action_graph(
             focus_other_id=state.get("target_id"),
             registry=registry,
         )
+        # 传输缓存：action_service 读后即 pop，不作真相权威
         session.graph_meta["last_effects"] = effects
         session.graph_meta["last_new_events"] = [
             e.model_dump(mode="json") for e in (created or [])
         ]
+        from app.core.services import chat_log
+
+        # dialogue 字典：对白 + 封条 + 至多一条机械局势投影
+        chat_log.record_talk_turn(
+            session,
+            npc_id=state.get("target_id") or "",
+            player_text=state.get("utterance") or "",
+            npc_text=state.get("npc_utterance") or "",
+            events=created or [],
+            effects=effects,
+        )
         session.graph_meta.pop("_talk_material", None)
         session.graph_meta.pop("_talk_adj", None)
         session.graph_meta.pop("_talk_fast", None)
-        session.graph_meta.pop("_talk_simulate_clues", None)
-        session.graph_meta.pop("_talk_simulate_intents", None)
         session.graph_meta.pop("_talk_proclamation_content", None)
         repo.save(session)
         return {

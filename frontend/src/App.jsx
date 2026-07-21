@@ -9,42 +9,55 @@ import {
   severityLabel,
 } from "./format";
 import { PullSheet } from "./Sheet";
+import { DuelPlayPanel } from "./stage/modules/DuelPlayPanel";
 
-/** 把 effects 对象收成气泡文案（仅展卷后展示） */
-function formatEffectsBubble(effects, otherName) {
-  if (!effects || typeof effects !== "object") return "";
-  if (effects.full_text) return effects.full_text;
-  const blocks = [];
-  if (effects.self_lines?.length) {
-    blocks.push("【己身】\n" + effects.self_lines.map((x) => `· ${x}`).join("\n"));
-  }
-  const oname = effects.other_name || otherName || "对方";
-  if (effects.other_lines?.length) {
-    blocks.push(`【${oname}】\n` + effects.other_lines.map((x) => `· ${x}`).join("\n"));
-  } else if (effects.other_id || otherName) {
-    blocks.push(`【${oname}】\n· 未见明显状态流转`);
-  }
-  for (const o of effects.others || []) {
-    if (o.lines?.length) {
-      blocks.push(`【${o.name || o.id}】\n` + o.lines.map((x) => `· ${x}`).join("\n"));
-    }
-  }
-  if (effects.world_lines?.length) {
-    blocks.push("【天下】\n" + effects.world_lines.map((x) => `· ${x}`).join("\n"));
-  }
-  if (effects.ap_cost > 0) {
-    blocks.push(`【余力】\n· 此番耗费 ${effects.ap_cost}`);
-  }
-  return blocks.join("\n\n");
+const SCENE_KEY = "_scene";
+
+function countdownFromSession(session) {
+  const row = (session?.clue_flags || []).find((f) => f.key === "xuanyin_countdown");
+  return row?.value ?? null;
 }
 
-/** 未展卷：列表/封条只露题面，不泄局势（客户端可已持有全文） */
+/** 服务端 chat 消息 → 前端气泡字段 */
+function msgsToBubbles(messages) {
+  return (messages || []).map((m) => {
+    const eventId = m.eventId || m.event_id;
+    if (m.role === "event_card") {
+      return {
+        ...m,
+        eventId,
+        sealed: m.sealed !== false && !m.read,
+        headline: m.headline || m.card_headline || "旧事",
+      };
+    }
+    if (m.role === "event_body" || m.role === "effect") {
+      return { ...m, eventId };
+    }
+    return { ...m };
+  });
+}
+
+function cloneChatStore(store) {
+  const out = {};
+  for (const [k, th] of Object.entries(store || {})) {
+    out[k] = {
+      actor_id: th?.actor_id || k,
+      updated_day: th?.updated_day,
+      messages: [...(th?.messages || [])],
+    };
+  }
+  return out;
+}
+
 function sealedPreview(ev) {
   if (ev?.greyed) return "雾障未开。展卷后方可知一二。";
-  return "因果已落卷中。点开展卷，方见己身与对方之变。";
+  return "因果已落卷中。点一下，正文在下。";
 }
 
 function EventCardList({ items, onSelect, session, readIds }) {
+  /** 簿录页本地展卷（对话流的 reveal 找不到封条时，以前会「点了没反应」） */
+  const [openId, setOpenId] = useState(null);
+
   if (!items?.length) {
     return (
       <div className="event-card-list">
@@ -57,22 +70,29 @@ function EventCardList({ items, onSelect, session, readIds }) {
   return (
     <div className="event-card-list">
       {items.map((ev) => {
+        const id = ev.event_id;
         const headline = ev.card_headline || ev.title || "旧事";
-        const read = readIds?.has?.(ev.event_id);
-        // 正文完整给卡面；用 CSS 控制换行，不再硬截到一行
-        const preview = read
-          ? String(ev.summary || ev.card_body || "（无摘要）")
-              .replace(/——局势——[\s\S]*/, "")
-              .replace(/\s*\n+\s*/g, " ")
-              .trim() || "（无摘要）"
-          : sealedPreview(ev);
+        const read = readIds?.has?.(id);
+        const open = openId === id;
+        const fullBody = String(ev.card_body || ev.summary || "").trim();
+        // 未展卷：封条提示；已展卷未点开：摘要一行；点开：见下方正文
+        const preview = open
+          ? ""
+          : read
+            ? String(ev.summary || fullBody || "（无摘要）")
+                .replace(/\s*\n+\s*/g, " ")
+                .trim() || "（无摘要）"
+            : sealedPreview(ev);
         const sev = severityLabel(ev.severity);
         return (
           <button
             type="button"
-            key={ev.event_id}
-            className={`event-card ${ev.greyed ? "greyed" : ""} ${read ? "read" : "unread"} sev-${ev.severity || "minor"}`}
-            onClick={() => onSelect?.(ev)}
+            key={id}
+            className={`event-card ${ev.greyed ? "greyed" : ""} ${read || open ? "read" : "unread"} ${open ? "open" : ""} sev-${ev.severity || "minor"}`}
+            onClick={() => {
+              onSelect?.(ev);
+              setOpenId((prev) => (prev === id ? null : id));
+            }}
           >
             <div className="event-card-top">
               <span className="event-card-day">第{ev.day}日</span>
@@ -81,12 +101,18 @@ function EventCardList({ items, onSelect, session, readIds }) {
               <span className="event-card-track">
                 {ev.track === "self" ? "己身" : "天下"}
               </span>
-              {!read && !ev.greyed ? (
+              {!read && !open && !ev.greyed ? (
                 <span className="event-card-unread">未展卷</span>
               ) : null}
             </div>
             <div className="event-card-title">{headline}</div>
-            <div className="event-card-preview">{preview}</div>
+            {preview ? <div className="event-card-preview">{preview}</div> : null}
+            {open && fullBody ? (
+              <div className="event-card-body prose-box">{fullBody}</div>
+            ) : null}
+            {open && !fullBody ? (
+              <div className="event-card-body event-card-body-empty">（卷中无字）</div>
+            ) : null}
             <div className="event-card-foot">
               {!ev.greyed && ev.location ? (
                 <span>{locationName(session, ev.location)}</span>
@@ -94,7 +120,7 @@ function EventCardList({ items, onSelect, session, readIds }) {
                 <span>{ev.greyed ? "未明" : " "}</span>
               )}
               <span className="event-card-open">
-                {ev.greyed ? "窥探" : read ? "再阅" : "点开展卷"}
+                {ev.greyed ? "窥探" : open ? "收起" : read ? "再阅" : "点开展卷"}
               </span>
             </div>
           </button>
@@ -110,20 +136,20 @@ export default function App() {
   const [bootError, setBootError] = useState("");
   const [targetId, setTargetId] = useState(null);
   const [text, setText] = useState("");
-  const [bubbles, setBubbles] = useState([]);
+  /** 按 actor_id 分仓；权威来自 session.chat_by_actor */
+  const [chatByActor, setChatByActor] = useState({});
   const [locModal, setLocModal] = useState(null);
   const [actorModal, setActorModal] = useState(null);
   const [showStatus, setShowStatus] = useState(false);
+  const [showClues, setShowClues] = useState(false);
+  const [showBeliefs, setShowBeliefs] = useState(false);
   const [logTab, setLogTab] = useState("self");
   // 固定单行 log（错误/提示不占多行）
   const [logLine, setLogLine] = useState("");
   const [saves, setSaves] = useState([]);
   const [worlds, setWorlds] = useState([{ world_id: "luoxia", display_name: "落霞宗" }]);
   const [worldId, setWorldId] = useState("luoxia");
-  const [eventModal, setEventModal] = useState(null);
-  const [eventSheetRevealed, setEventSheetRevealed] = useState(false);
   const [healthInfo, setHealthInfo] = useState(null);
-  const [showHelp, setShowHelp] = useState(false);
   // 交谈模式：选中人并点「交谈」后才出现输入
   const [talkMode, setTalkMode] = useState(false);
   // chat=此地 | map | log
@@ -146,6 +172,29 @@ export default function App() {
     if (!session || !targetId) return null;
     return session.all_actors.find((a) => a.id === targetId)?.name;
   }, [session, targetId]);
+
+  const activeChatKey = talkMode && targetId ? targetId : SCENE_KEY;
+  const bubbles = useMemo(
+    () => msgsToBubbles(chatByActor[activeChatKey]?.messages || []),
+    [chatByActor, activeChatKey]
+  );
+
+  function syncChatFromSession(sess) {
+    if (!sess?.chat_by_actor) return;
+    setChatByActor(cloneChatStore(sess.chat_by_actor));
+  }
+
+  function patchThread(actorId, updater) {
+    const key = actorId || SCENE_KEY;
+    setChatByActor((prev) => {
+      const th = prev[key] || { actor_id: key, messages: [] };
+      const messages = updater([...(th.messages || [])]);
+      return {
+        ...prev,
+        [key]: { ...th, actor_id: key, messages },
+      };
+    });
+  }
 
   const ended =
     session &&
@@ -196,22 +245,19 @@ export default function App() {
     try {
       const data = await api.createGame(worldId);
       setSession(data.session);
+      syncChatFromSession(data.session);
       const guideEv = (data.session.recent_events || []).find((e) =>
         (e.tags || []).includes("guide")
       );
-      const boot =
-        guideEv?.summary ||
-        (worldId === "qingxi"
-          ? "你投宿青溪小驿，院中马嘶人声。"
-          : "你以客卿弟子之身，踏入落霞宗外门客居。");
-      setBubbles([{ role: "sys", text: boot }]);
+      const read = new Set();
+      if (guideEv?.event_id) read.add(guideEv.event_id);
+      // 须知只认服务端 dialogue._scene / guide 事件，前端不发明文案
       setTargetId(null);
       setTalkMode(false);
       setMainTab("chat");
-      setShowHelp(true);
-      setReadEventIds(new Set());
-      readEventIdsRef.current = new Set();
-      sealedShownRef.current = new Set();
+      setReadEventIds(read);
+      readEventIdsRef.current = read;
+      sealedShownRef.current = new Set(read);
       eventPayloadRef.current = {};
       localStorage.setItem("engine_session_id", data.session.session_id);
     } catch (e) {
@@ -227,7 +273,7 @@ export default function App() {
     try {
       const data = await api.getGame(id);
       setSession(data.session);
-      setBubbles([{ role: "sys", text: `第${data.session.day}日，前缘未了，因果犹在。` }]);
+      syncChatFromSession(data.session);
       setTargetId(null);
       setTalkMode(false);
       setMainTab("chat");
@@ -291,86 +337,30 @@ export default function App() {
       if (data.session) {
         setSession(data.session);
         localStorage.setItem("engine_session_id", data.session.session_id);
+        if (data.session.chat_by_actor) {
+          syncChatFromSession(data.session);
+        }
       }
       if (data.message) pushLog(data.message);
       if (body.type === "talk") {
-        // 对白立刻可见；事件/局势进「封条卡」——只挂「本轮」事件，绝不回退到旧事件
-        const withoutPending = (list) => list.filter((x) => !x.pending);
-        const readSet = readEventIdsRef.current;
         const shownSet = sealedShownRef.current;
-        const effects = data.effects || {};
+        const news = data.new_events || [];
 
-        // 1) 优先后端本轮 new_events（唯一可信来源）
-        let pick = (data.new_events || []).find(
-          (e) => e?.event_id && !e.greyed && !shownSet.has(e.event_id)
-        );
-
-        // 2) 兜底：recent 里「未展卷且未挂过封条」的最新一条（recent 为新→旧）
-        if (!pick) {
-          const recent = (data.session?.recent_events || []).filter(
-            (e) =>
-              e?.event_id &&
-              e.involves_player &&
-              !e.greyed &&
-              !readSet.has(e.event_id) &&
-              !shownSet.has(e.event_id)
-          );
-          pick = recent[0] || null;
-        }
-
-        // 3) 仅有局势无事件时，造本轮虚拟卡（唯一 id）
-        let sealedId = pick?.event_id || null;
-        if (sealedId) {
-          eventPayloadRef.current[sealedId] = {
-            event: pick,
-            effects,
-          };
-          shownSet.add(sealedId);
-        } else if (effects.full_text || effects.has_any) {
-          sealedId = `fx_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-          eventPayloadRef.current[sealedId] = {
-            event: {
-              event_id: sealedId,
-              day: data.session?.day,
-              title: "言谈余波",
-              card_headline: "言谈余波",
-              kind: "social",
-              severity: "trivial",
-              track: "self",
-              involves_player: true,
-              summary: data.message || "一席话落定",
-              card_body: data.message || "",
-            },
-            effects,
-          };
-          shownSet.add(sealedId);
-        }
-
-        setBubbles((b) => {
-          const next = [
-            ...withoutPending(b),
-            ...(data.npc_utterance
-              ? [{ role: "npc", text: data.npc_utterance }]
-              : [{ role: "sys", text: "对方未答话。" }]),
-          ];
-          if (sealedId && eventPayloadRef.current[sealedId]) {
-            const { event: ev } = eventPayloadRef.current[sealedId];
-            next.push({
-              role: "event_card",
-              sealed: true,
-              eventId: sealedId,
-              headline: ev.card_headline || ev.title || "旧事",
-              day: ev.day,
-              kind: ev.kind,
-              severity: ev.severity,
-            });
-          } else if (data.message) {
-            next.push({ role: "sys", text: data.message });
-          }
-          return next;
+        // 事件权威 = 叙事卡；机械局势已由服务端写入 chat effect，前端不发明、不挂卡
+        news.forEach((e) => {
+          if (!e?.event_id) return;
+          eventPayloadRef.current[e.event_id] = { event: e };
+          shownSet.add(e.event_id);
         });
+        if (data.session?.chat_by_actor) {
+          syncChatFromSession(data.session);
+        }
+        // 无 chat_by_actor 则只认服务端会话；不发明 npc 气泡
       } else if (data.message && data.session?.phase !== "WORLD_EVOLVE") {
-        setBubbles((b) => [...b, { role: "sys", text: data.message }]);
+        patchThread(SCENE_KEY, (msgs) => [
+          ...msgs,
+          { role: "sys", text: data.message, id: `sys_${Date.now()}` },
+        ]);
       }
       if (!data.ok) {
         pushLog(data.message || data.error_code || "未成");
@@ -380,13 +370,15 @@ export default function App() {
       if (data?.ok && data.session?.phase === "WORLD_EVOLVE") {
         if (data.message) setEvolveHint(data.message);
         const finalS = await drainNight(data.session.session_id, data.session);
+        if (finalS?.chat_by_actor) syncChatFromSession(finalS);
         return { ...data, session: finalS };
       }
       return data;
     } catch (e) {
       pushLog(String(e.message || e));
-      if (body.type === "talk") {
-        setBubbles((b) => b.filter((x) => !x.pending));
+      if (body.type === "talk" && (body.target_id || targetId)) {
+        const npcId = body.target_id || targetId;
+        patchThread(npcId, (msgs) => msgs.filter((x) => !x.pending));
       }
     } finally {
       setLoading(false);
@@ -394,110 +386,98 @@ export default function App() {
     }
   }
 
-  /** 点事件卡 → 明确弹窗（动画位 + 启）；按 event_id 取缓存，禁止串卡 */
-  function openEventSheet(ev, preferId) {
-    if (!ev && !preferId) return;
-    const id = preferId || ev.event_id;
-    if (!id) return;
-    const cached = eventPayloadRef.current[id];
-    // 缓存优先（本轮封条挂的是完整 payload）；再与传入/会话列表合并
-    const base = cached?.event || ev || {};
-    const merged = { ...base, ...(ev || {}), event_id: id };
-    let effects = { ...(cached?.effects || {}) };
-    if (!effects.full_text && merged.card_body && String(merged.card_body).includes("——局势——")) {
-      const part = String(merged.card_body).split("——局势——")[1] || "";
-      effects = { ...effects, full_text: part.trim() };
-    }
-    eventPayloadRef.current[id] = { event: merged, effects };
-    const already = readEventIdsRef.current.has(id);
-    setEventSheetRevealed(already);
-    setEventModal({ ...merged, _effects: effects });
-  }
-
   /**
-   * 点「启」：弹窗揭示 + 写入对话流（UI 至此才「已知」）
+   * 展卷：
+   * - 对话流里有对应封条 → 在气泡下插入正文
+   * - 因果簿点卡 → 列表自己展开正文（EventCardList openId）；此处只记已读 + 若对话里有封条则同步
+   * - 已读再点不再 early-return（簿录要能「再阅」）
    */
-  function qiEventSheet() {
-    const ev = eventModal;
-    if (!ev || ev.greyed) return;
-    const id = ev.event_id;
-    const cached = eventPayloadRef.current[id] || { event: ev, effects: ev._effects || {} };
-    const effects = cached.effects || ev._effects || {};
-    eventPayloadRef.current[id] = { event: { ...cached.event, ...ev }, effects };
+  function revealEventInline(preferId, evHint) {
+    const id = preferId || evHint?.event_id;
+    if (!id) return;
 
-    const already = readEventIds.has(id);
-    setEventSheetRevealed(true);
-    setReadEventIds((prev) => {
-      const n = new Set(prev);
-      n.add(id);
-      readEventIdsRef.current = n;
-      return n;
-    });
-    sealedShownRef.current.add(id);
+    const cached = eventPayloadRef.current[id];
+    const fromSession = session?.recent_events?.find((e) => e.event_id === id);
+    const ev = { ...(cached?.event || fromSession || evHint || {}), event_id: id };
+    eventPayloadRef.current[id] = { event: ev };
 
-    const otherName =
-      effects.other_name ||
-      (ev.actor_ids || [])
-        .map((aid) => session?.all_actors?.find((a) => a.id === aid)?.name)
-        .filter(Boolean)
-        .find((n) => n) ||
-      "";
-    const effectText =
-      formatEffectsBubble(effects, otherName) ||
-      "【局势】\n· 暂无可见的状态变化";
-    const pureBody = String(ev.card_body || ev.summary || "")
-      .split("——局势——")[0]
-      .trim();
+    const pureBody = String(ev.card_body || ev.summary || "").trim();
+    const threadKey = talkMode && targetId ? targetId : activeChatKey;
+    const alreadyRead = readEventIdsRef.current.has(id);
 
-    setMainTab("chat");
-    setBubbles((b) => {
-      const mapped = b.map((x) =>
-        x.role === "event_card" && x.eventId === id
-          ? { ...x, sealed: false, read: true }
-          : x
+    if (!alreadyRead) {
+      setReadEventIds((prev) => {
+        const n = new Set(prev);
+        n.add(id);
+        readEventIdsRef.current = n;
+        return n;
+      });
+      sealedShownRef.current.add(id);
+    }
+
+    patchThread(threadKey, (b) => {
+      const idx = b.findIndex(
+        (x) =>
+          x.role === "event_card" && (x.eventId === id || x.event_id === id)
       );
-      if (already) return mapped;
-      return [
-        ...mapped,
-        {
-          role: "sys",
-          text: `你启卷「${ev.card_headline || ev.title || "旧事"}」。`,
-        },
-        ...(pureBody ? [{ role: "sys", text: pureBody }] : []),
-        {
-          role: "effect",
-          eventId: id,
-          text: effectText,
-        },
-      ];
-    });
-  }
+      // 对话里没有这张封条（簿录点开常见）→ 不改线程
+      if (idx < 0) return b;
 
-  function closeEventSheet() {
-    setEventModal(null);
-    setEventSheetRevealed(false);
+      const opened = {
+        role: "event_card",
+        sealed: false,
+        read: true,
+        event_id: id,
+        eventId: id,
+        headline: ev.card_headline || ev.title || "旧事",
+        day: ev.day,
+        kind: ev.kind,
+        severity: ev.severity,
+      };
+      const next = [...b];
+      next[idx] = { ...next[idx], ...opened };
+      if (
+        b.some(
+          (x) =>
+            (x.eventId === id || x.event_id === id) && x.role === "event_body"
+        )
+      ) {
+        return next;
+      }
+      if (pureBody) {
+        next.splice(idx + 1, 0, {
+          role: "event_body",
+          event_id: id,
+          eventId: id,
+          text: pureBody,
+        });
+      }
+      return next;
+    });
   }
 
   async function sendTalk() {
     if (!targetId || !text.trim()) return;
     const utter = text.trim();
     const who = targetName || "对方";
+    const npcId = targetId;
     setText("");
-    // 己方气泡 + 占位「正在思考」，避免长等待像卡住
-    setBubbles((b) => [
-      ...b,
-      { role: "player", text: utter },
+    // 乐观：只写入该人线程
+    patchThread(npcId, (msgs) => [
+      ...msgs,
+      { role: "player", text: utter, id: `tmp_p_${Date.now()}` },
       {
         role: "npc",
         pending: true,
         text: `${who}正在思索…`,
+        id: `tmp_pend_${Date.now()}`,
       },
     ]);
     try {
-      await doAction({ type: "talk", target_id: targetId, utterance: utter });
+      await doAction({ type: "talk", target_id: npcId, utterance: utter });
     } catch {
-      setBubbles((b) => [
-        ...b.filter((x) => !x.pending),
+      patchThread(npcId, (msgs) => [
+        ...msgs.filter((x) => !x.pending),
         { role: "sys", text: "言路中断，未得回音。" },
       ]);
     }
@@ -604,19 +584,7 @@ export default function App() {
   // 对话/行动推演：仅顶栏小提示；入夜：大弹窗
   const topBusy = loading && !evolving;
   const showNightSheet =
-    evolving && !eventModal && !locModal && !actorModal && !showHelp && !showStatus;
-  const eventEffects = eventModal
-    ? eventPayloadRef.current[eventModal.event_id]?.effects || eventModal._effects || {}
-    : {};
-  const pureEventBody = eventModal
-    ? String(eventModal.card_body || eventModal.summary || "")
-        .split("——局势——")[0]
-        .trim()
-    : "";
-  const eventEffectText = eventModal
-    ? formatEffectsBubble(eventEffects, eventEffects.other_name) ||
-      (eventModal.greyed ? "雾障未开，难窥端倪。" : "")
-    : "";
+    evolving && !locModal && !actorModal && !showStatus && !showClues && !showBeliefs;
 
   return (
     <div className="app">
@@ -636,24 +604,23 @@ export default function App() {
               <span className="stat topbar-stat">
                 第<strong>{session.day}</strong>/{session.max_days}日
                 {" · "}余力<strong>{session.ap}</strong>
-                {session.world_flags_public?.xuanyin_countdown != null && (
+                {countdownFromSession(session) != null && (
                   <>
                     {" · "}劫数
-                    <strong>
-                      {typeof session.world_flags_public.xuanyin_countdown === "object"
-                        ? session.world_flags_public.xuanyin_countdown.value
-                        : session.world_flags_public.xuanyin_countdown}
-                    </strong>
+                    <strong>{countdownFromSession(session)}</strong>
                   </>
                 )}
               </span>
             </div>
             <div className="topbar-actions">
-              <button type="button" className="tb-btn" onClick={() => setShowHelp(true)}>
-                须知
-              </button>
               <button type="button" className="tb-btn" onClick={() => setShowStatus(true)}>
-                己身
+                情境
+              </button>
+              <button type="button" className="tb-btn" onClick={() => setShowBeliefs(true)}>
+                见闻
+              </button>
+              <button type="button" className="tb-btn" onClick={() => setShowClues(true)}>
+                隐情
               </button>
               <button
                 type="button"
@@ -674,14 +641,74 @@ export default function App() {
       </div>
 
       {ended && (
-        <div className="panel banner-panel" style={{ borderColor: "var(--accent)" }}>
+        <div className="panel banner-panel ending-panel" style={{ borderColor: "var(--accent)" }}>
           <h3>因缘落定</h3>
-          <p className="muted-p">{session.game_over_reason || phaseLabel(session.phase)}</p>
-          <div className="tag-row">
-            {(session.ending_tags || []).map((t) => (
-              <span key={t} className="tag-pill">
-                {t}
-              </span>
+          <p className="muted-p">
+            {session.game_over_reason || phaseLabel(session.phase)}
+            {" · "}第{session.day}日
+          </p>
+          {session.settlement_text && (
+            <p className="ending-settlement">{session.settlement_text}</p>
+          )}
+          <h4 className="section-h">己身</h4>
+          <div className="kv ending-kv">
+            <div>
+              <strong>身份</strong>
+              {player?.identity?.title || player?.title || "—"}
+            </div>
+            <div>
+              <strong>修为</strong>
+              {formatCultivation(player?.cultivation)}
+            </div>
+            <div>
+              <strong>所在</strong>
+              {player?.location_label || "—"}
+            </div>
+            <div>
+              <strong>灵石</strong>
+              {player?.resources?.spirit_stones ?? 0}
+            </div>
+            <div>
+              <strong>随身</strong>
+              {formatInventory(player?.inventory)}
+            </div>
+            <div>
+              <strong>存亡</strong>
+              {player?.alive === false ? "已故" : "尚在"}
+            </div>
+          </div>
+          {(player?.beliefs || []).length > 0 && (
+            <>
+              <h4 className="section-h">见闻</h4>
+              <div className="logs compact belief-book">
+                {(player.beliefs || []).map((b) => (
+                  <div key={b.belief_id || b.proposition} className="log-item">
+                    {b.category_label ? (
+                      <span className="belief-cat-h">{b.category_label} · </span>
+                    ) : null}
+                    第{b.day ?? "?"}日 · {b.proposition}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <h4 className="section-h">经历</h4>
+          <div className="logs compact ending-chronicle">
+            {(session.recent_events || []).length === 0 && (
+              <div className="log-item greyed">无事件记录</div>
+            )}
+            {(session.recent_events || []).map((e) => (
+              <div
+                key={e.event_id || `${e.day}-${e.title}`}
+                className={`log-item ${e.greyed ? "greyed" : ""}`}
+              >
+                <div className="log-item-title">
+                  第{e.day ?? "?"}日 · {e.card_headline || e.title || "事"}
+                </div>
+                <div className="log-item-body">
+                  {e.card_body || e.summary || ""}
+                </div>
+              </div>
             ))}
           </div>
           <button className="primary btn-block" type="button" onClick={start} style={{ marginTop: 12 }}>
@@ -726,27 +753,14 @@ export default function App() {
                 ))}
                 {!actorsHere.length && <div className="stat empty-scene">四下无人</div>}
               </div>
-              {bubbles.some((b) => b.role === "event_card" && b.sealed) && (
-                <div className="pending-events">
-                  {bubbles
-                    .filter((b) => b.role === "event_card" && b.sealed)
-                    .map((b) => (
-                      <button
-                        key={b.eventId}
-                        type="button"
-                        className="event-card-inline sealed mini"
-                        onClick={() => {
-                          const payload = eventPayloadRef.current[b.eventId];
-                          const fromSession = session.recent_events?.find(
-                            (e) => e.event_id === b.eventId
-                          );
-                          openEventSheet(payload?.event || fromSession || { event_id: b.eventId, card_headline: b.headline }, b.eventId);
-                        }}
-                      >
-                        <span className="event-card-title">{b.headline}</span>
-                        <span className="event-card-open">展卷</span>
-                      </button>
-                    ))}
+              {/* 场景仓系统句（须知等）— 不与 NPC 对话混仓 */}
+              {(chatByActor[SCENE_KEY]?.messages || []).length > 0 && (
+                <div className="bubbles scene-bubbles" ref={!talkMode ? bubblesRef : undefined}>
+                  {msgsToBubbles(chatByActor[SCENE_KEY].messages).map((b, i) => (
+                    <div key={b.id || `scene-${i}`} className={`bubble ${b.role}`}>
+                      {b.text}
+                    </div>
+                  ))}
                 </div>
               )}
             </>
@@ -775,43 +789,53 @@ export default function App() {
                 </button>
               </div>
               <div className="bubbles" ref={bubblesRef}>
+                {!bubbles.length && (
+                  <div className="bubble sys muted">尚未交谈。出言即可。</div>
+                )}
                 {bubbles.map((b, i) =>
                   b.role === "event_card" ? (
                     <button
-                      key={b.eventId || `ev-${i}`}
+                      key={b.eventId || b.id || `ev-${i}`}
                       type="button"
                       className={`bubble event-card-inline ${b.sealed ? "sealed" : "opened"}`}
+                      disabled={!b.sealed}
                       onClick={() => {
+                        if (!b.sealed) return;
                         const payload = eventPayloadRef.current[b.eventId];
                         const fromSession = session.recent_events?.find(
                           (e) => e.event_id === b.eventId
                         );
-                        openEventSheet(
-                          payload?.event || fromSession || {
-                            event_id: b.eventId,
-                            card_headline: b.headline,
-                            day: b.day,
-                            kind: b.kind,
-                          },
-                          b.eventId
+                        revealEventInline(
+                          b.eventId,
+                          payload?.event ||
+                            fromSession || {
+                              event_id: b.eventId,
+                              card_headline: b.headline,
+                              day: b.day,
+                              kind: b.kind,
+                            }
                         );
                       }}
                     >
                       <div className="event-card-title">{b.headline}</div>
                       <div className="event-card-preview">
-                        {b.sealed ? "点开展卷" : "已展卷"}
+                        {b.sealed ? "点一下，正文在下" : "已展卷"}
                       </div>
                     </button>
                   ) : (
                     <div
-                      key={b.eventId || `b-${i}`}
+                      key={
+                        b.id ||
+                        (b.eventId
+                          ? `${b.role}-${b.eventId}-${i}`
+                          : `b-${i}`)
+                      }
                       className={`bubble ${b.role}${b.pending ? " pending" : ""}`}
                     >
                       {b.role === "effect" ? (
-                        <>
-                          <div className="effect-title">局势变化</div>
-                          <pre className="effect-body">{b.text}</pre>
-                        </>
+                        <p className="effect-footnote">{b.text}</p>
+                      ) : b.role === "event_body" ? (
+                        <div className="prose-box">{b.text}</div>
                       ) : (
                         b.text
                       )}
@@ -826,17 +850,31 @@ export default function App() {
         <div className={`panel tab-panel ${mainTab === "map" ? "active" : ""}`}>
           <h3>行途</h3>
           <div className="list">
-            {session.locations.map((loc) => (
-              <button
-                key={loc.id}
-                type="button"
-                className={`card-btn ${loc.is_current ? "current" : ""}`}
-                onClick={() => setLocModal(loc)}
-              >
-                <div className="name">{loc.name}</div>
-                <div className="sub">{loc.is_current ? "身在此处" : loc.summary}</div>
-              </button>
-            ))}
+            {session.locations.map((loc) => {
+              const locked = !!loc.locked && !loc.is_current;
+              return (
+                <button
+                  key={loc.id}
+                  type="button"
+                  className={`card-btn ${loc.is_current ? "current" : ""} ${
+                    locked ? "locked-loc greyed-card" : ""
+                  }`}
+                  onClick={() => setLocModal(loc)}
+                >
+                  <div className="name">
+                    {loc.name}
+                    {locked ? <span className="loc-lock-tag">未开</span> : null}
+                  </div>
+                  <div className="sub">
+                    {loc.is_current
+                      ? "身在此处"
+                      : locked
+                        ? loc.lock_reason || "此处暂不可入"
+                        : loc.summary}
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -869,7 +907,7 @@ export default function App() {
             items={logs}
             session={session}
             readIds={readEventIds}
-            onSelect={(ev) => openEventSheet(ev)}
+            onSelect={(ev) => revealEventInline(ev.event_id, ev)}
           />
         </div>
       </div>
@@ -919,6 +957,51 @@ export default function App() {
         </nav>
       </div>
 
+      {/* 交锋：通用画模块 + 文字面点选 */}
+      <PullSheet
+        open={!!session?.encounter}
+        onClose={() => {}}
+        dismissible={false}
+        busy={loading && !!session?.encounter}
+        defaultFace="text"
+        stageModule={session?.encounter?.stage_module || "duel"}
+        stageMark={session?.encounter?.self_mark || "武"}
+        stageTitle={
+          session?.encounter
+            ? `对峙 · ${session.encounter.foe_name || "对手"}`
+            : "交锋"
+        }
+        stageHint="点选小招 · 双方确定后对拼"
+        stageSelf={{
+          mark: session?.encounter?.self_mark || "我",
+          label: session?.encounter?.self_name || "己方",
+        }}
+        stageFoe={{
+          mark: session?.encounter?.foe_mark || "敌",
+          label: session?.encounter?.foe_name || "对方",
+        }}
+        stagePayload={session?.encounter || null}
+      >
+        {session?.encounter ? (
+          <DuelPlayPanel
+            encounter={session.encounter}
+            loading={loading}
+            onConfirm={async (moves) => {
+              await doAction({
+                type: "encounter",
+                payload: { op: "confirm", moves },
+              });
+            }}
+            onCancel={async () => {
+              await doAction({
+                type: "encounter",
+                payload: { op: "cancel" },
+              });
+            }}
+          />
+        ) : null}
+      </PullSheet>
+
       {/* 入夜：大弹窗；对话推演只用顶栏小提示 */}
       <PullSheet
         open={showNightSheet}
@@ -926,7 +1009,7 @@ export default function App() {
         dismissible={false}
         busy={loading}
         defaultFace="anim"
-        animSlot="tiandao"
+        stageModule="tiandao"
         stageMark="夜"
         stageTitle="夜色流转"
         stageHint={
@@ -955,35 +1038,50 @@ export default function App() {
       <PullSheet
         open={!!locModal}
         onClose={() => setLocModal(null)}
-        defaultFace="anim"
-        animSlot="location"
+        defaultFace="text"
+        stageModule="location"
         stageMark={(locModal?.name || "地").slice(0, 1)}
         stageTitle={locModal?.name || ""}
-        stageHint={locModal?.is_current ? "身在此处" : "可行之路"}
+        stageHint={
+          locModal?.is_current
+            ? "身在此处"
+            : locModal?.locked
+              ? "门禁未开"
+              : "可行之路"
+        }
         actions={[
           { key: "close", label: "罢了", onClick: () => setLocModal(null) },
           {
             key: "go",
-            label: locModal?.is_current ? "身已在此" : "前往",
+            label: locModal?.is_current
+              ? "身已在此"
+              : locModal?.locked
+                ? "不可入"
+                : "前往",
             primary: true,
             disabled:
               loading ||
               locModal?.is_current ||
+              locModal?.locked ||
               session.phase !== "PLAYER_TURN" ||
               ended,
             onClick: () => goToLocation(locModal.id),
           },
         ]}
       >
-        <p className="sheet-copy">{locModal?.summary || "—"}</p>
+        <p className="sheet-copy">
+          {locModal?.locked
+            ? locModal?.lock_reason || "此处暂不可入"
+            : locModal?.summary || "—"}
+        </p>
       </PullSheet>
 
       {/* 人物：介绍 + 交谈/否 */}
       <PullSheet
         open={!!actorModal}
         onClose={() => setActorModal(null)}
-        defaultFace="anim"
-        animSlot="actor"
+        defaultFace="text"
+        stageModule="actor"
         stageMark={(actorModal?.name || "人").slice(0, 1)}
         stageTitle={actorModal?.name || ""}
         stageHint={actorModal?.title || (actorModal?.alive ? "在场" : "已故")}
@@ -997,6 +1095,24 @@ export default function App() {
                     key: "no",
                     label: "否",
                     onClick: () => setActorModal(null),
+                  },
+                  {
+                    key: "spar",
+                    label: "切磋",
+                    disabled:
+                      loading ||
+                      session.phase !== "PLAYER_TURN" ||
+                      ended ||
+                      !!session.encounter,
+                    onClick: async () => {
+                      const foeId = actorModal.id;
+                      setActorModal(null);
+                      await doAction({
+                        type: "encounter",
+                        target_id: foeId,
+                        payload: { op: "start", foe_id: foeId },
+                      });
+                    },
                   },
                   {
                     key: "talk",
@@ -1031,197 +1147,90 @@ export default function App() {
         )}
       </PullSheet>
 
-      {/* 事件卡：启 */}
-      <PullSheet
-        open={!!eventModal}
-        onClose={closeEventSheet}
-        defaultFace="anim"
-        animSlot="event-reveal"
-        stageMark={eventSheetRevealed ? "开" : "封"}
-        stageTitle={eventModal?.card_headline || eventModal?.title || "旧事"}
-        stageHint={
-          eventModal?.greyed
-            ? "雾障未开"
-            : eventSheetRevealed
-              ? "因果已启"
-              : "点「启」展卷"
-        }
-        actions={[
-          { key: "close", label: "合卷", onClick: closeEventSheet },
-          {
-            key: "qi",
-            label: eventModal?.greyed
-              ? "未明"
-              : eventSheetRevealed && readEventIds.has(eventModal?.event_id)
-                ? "已启"
-                : "启",
-            primary: true,
-            disabled:
-              !eventModal ||
-              eventModal.greyed ||
-              (eventSheetRevealed && readEventIds.has(eventModal.event_id)),
-            onClick: qiEventSheet,
-          },
-        ]}
-      >
-        {eventModal && (
-          <>
-            <div className="event-detail-meta">
-              {eventModal.day != null ? <span>第{eventModal.day}日</span> : null}
-              <span>{eventModal.track === "self" ? "己身" : "天下"}</span>
-              <span>{kindLabel(eventModal.kind)}</span>
-            </div>
-            {!eventSheetRevealed && !eventModal.greyed ? (
-              <p className="sheet-copy muted">
-                卷中有字。未启之前，局势不入眼；须点「启」，方成已知。
-              </p>
-            ) : null}
-            {(eventSheetRevealed || eventModal.greyed) && (
-              <div className="event-sheet-revealed">
-                {eventModal.greyed ? (
-                  <p className="grey-text">雾障未开，难窥端倪。</p>
-                ) : (
-                  <>
-                    {pureEventBody ? (
-                      <div className="prose-box">{pureEventBody}</div>
-                    ) : null}
-                    {eventEffectText ? (
-                      <div className="bubble effect event-sheet-effect">
-                        <div className="effect-title">局势变化</div>
-                        <pre className="effect-body">{eventEffectText}</pre>
-                      </div>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            )}
-          </>
-        )}
-      </PullSheet>
-
-      {/* 须知 */}
-      <PullSheet
-        open={showHelp}
-        onClose={() => setShowHelp(false)}
-        defaultFace="anim"
-        animSlot="help"
-        stageMark="知"
-        stageTitle="客卿须知"
-        stageHint="入门便览"
-        actions={[{ key: "ok", label: "知道了", primary: true, onClick: () => setShowHelp(false) }]}
-      >
-        <div className="status-panel">
-          <p>
-            <strong>此地</strong>
-            ：见眼前之人，点选观详，可交谈。
-          </p>
-          <p>
-            <strong>行途</strong>
-            ：择地前往，居中弹窗观详。
-          </p>
-          <p>
-            <strong>簿录</strong>
-            ：事件封条，点开展卷，再点「启」。
-          </p>
-          <p>
-            <strong>入夜</strong>
-            ：余力尽或自请入夜，众生自转。
-          </p>
-          <p>
-            <strong>弹窗</strong>
-            ：先见「画」，点画面可切换文字；点空白处合上。
-          </p>
-        </div>
-      </PullSheet>
-
-      {/* 己身 */}
+      {/* 情境 */}
       <PullSheet
         open={showStatus}
         onClose={() => setShowStatus(false)}
-        defaultFace="anim"
-        animSlot="status"
-        stageMark="己"
-        stageTitle="己身境况"
+        defaultFace="text"
+        stageModule="status"
+        stageMark="境"
+        stageTitle="情境"
         stageHint={player.identity?.title || player.title || "客卿"}
         actions={[{ key: "ok", label: "合上", primary: true, onClick: () => setShowStatus(false) }]}
       >
         <div className="status-panel">
           <div className="kv">
-            <div>
-              <strong>身份</strong>
-              {player.identity?.title || player.title || "—"}
-            </div>
-            <div>
-              <strong>修为</strong>
-              {formatCultivation(player.cultivation)}
-            </div>
-            <div>
-              <strong>灵石</strong>
-              {player.resources?.spirit_stones ?? 0}
-            </div>
-            <div>
-              <strong>所在</strong>
-              {player.location_label || locName}
-            </div>
-            <div>
-              <strong>随身</strong>
-              {formatInventory(player.inventory)}
-            </div>
-          </div>
-          {(session.case_lines || []).length > 0 && (
-            <>
-              <h3 className="section-h">案线</h3>
-              <div className="case-lines">
-                {(session.case_lines || []).map((line) => (
-                  <div key={line.id} className="case-line">
-                    <div className="case-line-title">{line.title}</div>
-                    <div className="case-stages">
-                      {(line.stages || []).map((st) => (
-                        <button
-                          key={st.id}
-                          type="button"
-                          className={`case-stage ${st.revealed ? "on" : "off"}`}
-                          title={st.revealed ? st.blurb || st.label_true : "尚未坐实"}
-                          onClick={() => {
-                            if (st.revealed && st.blurb) pushLog(st.blurb);
-                          }}
-                        >
-                          {st.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-          {(session.clue_flags || []).length > 0 && (
-            <>
-              <h3 className="section-h">隐情</h3>
-              <div className="clue-flags">
-                {(session.clue_flags || []).map((f) => (
-                  <div
-                    key={f.key}
-                    className={`clue-flag-row ${f.greyed ? "greyed" : ""}`}
-                  >
-                    <span className="clue-flag-label">{f.label_zh}</span>
-                    <span className="clue-flag-val">{f.display}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-          <h3 className="section-h">见闻</h3>
-          <div className="logs compact">
-            {(player.beliefs || []).length === 0 && (
-              <div className="log-item greyed">心中尚无沉淀</div>
-            )}
-            {(player.beliefs || []).slice(0, 8).map((b) => (
-              <div key={b.belief_id} className="log-item">
-                第{b.day}日 · {b.proposition}
+            {(player?.situation_rows || []).map((row) => (
+              <div key={row.key}>
+                <strong>{row.label}</strong>
+                {row.value}
               </div>
             ))}
+            {!(player?.situation_rows || []).length ? (
+              <p className="sheet-copy muted">尚无可见情境。</p>
+            ) : null}
           </div>
+        </div>
+      </PullSheet>
+
+      {/* 见闻（beliefs 投影） */}
+      <PullSheet
+        open={showBeliefs}
+        onClose={() => setShowBeliefs(false)}
+        defaultFace="text"
+        stageModule="beliefs"
+        stageMark="闻"
+        stageTitle="见闻"
+        stageHint="已写入心中的命题"
+        actions={[
+          { key: "ok", label: "合上", primary: true, onClick: () => setShowBeliefs(false) },
+        ]}
+      >
+        <div className="status-panel belief-book">
+          {(player?.beliefs || []).length === 0 ? (
+            <p className="sheet-copy muted">尚无见闻。</p>
+          ) : (
+            <div className="logs compact">
+              {(player.beliefs || []).map((b) => (
+                <div key={b.belief_id || b.proposition} className="log-item">
+                  {b.category_label ? (
+                    <span className="belief-cat-h">{b.category_label} · </span>
+                  ) : null}
+                  第{b.day ?? "?"}日 · {b.proposition}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </PullSheet>
+
+      {/* 隐情 */}
+      <PullSheet
+        open={showClues}
+        onClose={() => setShowClues(false)}
+        defaultFace="text"
+        stageModule="clues"
+        stageMark="隐"
+        stageTitle="隐情"
+        stageHint="已握之机缘与未明之处"
+        actions={[{ key: "ok", label: "合上", primary: true, onClick: () => setShowClues(false) }]}
+      >
+        <div className="status-panel">
+          {(session.clue_flags || []).length === 0 ? (
+            <p className="sheet-copy muted">尚无可见隐情。</p>
+          ) : (
+            <div className="clue-flags">
+              {(session.clue_flags || []).map((f) => (
+                <div
+                  key={f.key}
+                  className={`clue-flag-row ${f.greyed ? "greyed" : ""}`}
+                >
+                  <span className="clue-flag-label">{f.label_zh}</span>
+                  <span className="clue-flag-val">{f.display}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </PullSheet>
     </div>

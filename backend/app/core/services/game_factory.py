@@ -35,4 +35,16 @@ class GameFactory:
         )
         packet = pack.on_new_game(session) or {}
         apply_packet(session, packet)
+        # 开局须知进 _scene 聊天仓，不进任何 NPC
+        from app.core.services import chat_log
+
+        guide = ""
+        for ev in session.events:
+            tags = list(getattr(ev, "tags", None) or [])
+            if "guide" in tags or "onboarding" in tags:
+                guide = (ev.card_body or ev.summary or "").strip()
+                if guide:
+                    break
+        if guide:
+            chat_log.seed_scene_guide(session, guide)
         return session

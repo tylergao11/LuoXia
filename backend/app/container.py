@@ -1,4 +1,4 @@
-"""组合根：组装端口实现。换 LLM / DB / 世界包只改这里。"""
+"""组合根：组装端口实现。无 LLM 不准启动游戏服务。"""
 
 from __future__ import annotations
 
@@ -14,8 +14,6 @@ from app.infra.llm_adjudicator import LLMAdjudicator
 from app.infra.llm_client import LLMClient
 from app.infra.llm_mind import LLMAgentMind
 from app.infra.memory_repo import InMemorySessionRepository
-from app.infra.scripted_adjudicator import ScriptedAdjudicator
-from app.infra.scripted_mind import ScriptedAgentMind
 from app.infra.sqlite_repo import SqliteSessionRepository
 
 
@@ -33,19 +31,16 @@ class Container:
             self.store_mode = "sqlite"
 
         self.llm = LLMClient()
-
-        if settings.use_llm and self.llm.available:
-            self.adjudicator = LLMAdjudicator(self.llm)
-            self.mind = LLMAgentMind(self.llm)
-            self.llm_mode = f"llm ({settings.llm_model})"
-        elif settings.allow_scripted_ports:
-            self.adjudicator = ScriptedAdjudicator(registry=self.registry)
-            self.mind = ScriptedAgentMind()
-            self.llm_mode = "scripted"
-        else:
+        if not self.llm.available:
             raise RuntimeError(
-                "本产品仅支持 LLM 模式；请配置 LLM 或开启 allow_scripted_ports（仅开发/测试）"
+                "LLM 不可用：本产品必须连接大模型才能游玩。"
+                f"请检查 LLM_BASE_URL={settings.llm_base_url!r}、"
+                f"LLM_MODEL={settings.llm_model!r}、API Key，以及 Ollama/云端是否在线。"
             )
+
+        self.adjudicator = LLMAdjudicator(self.llm)
+        self.mind = LLMAgentMind(self.llm)
+        self.llm_mode = f"llm ({settings.llm_model})"
 
         self.factory = GameFactory(self.registry)
         self.actions = ActionService(

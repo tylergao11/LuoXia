@@ -15,7 +15,6 @@ from app.core.domain.models import (
     WorldEvent,
 )
 from app.core.ports.agent_mind import AgentMindPort
-from app.core.services.rule_intent import default_play_order, rule_intend, rule_intend_many
 from app.infra.llm_client import LLMClient
 from app.infra.night_batch import build_night_batch_messages, parse_night_batch
 from app.infra.prompt_blocks import (
@@ -25,30 +24,33 @@ from app.infra.prompt_blocks import (
     dumps_assistant_json,
 )
 
-REPLY_SYSTEM = """你是游戏中的一个 NPC，不是旁白，不是天道。
-## 认知边界
-- 只有：人设、drives、tags、自己的权威状态摘要、自己的信念。
-- DYNAMIC.extra.tendencies（若有）是公开倾向摘要，须纳入语气与态度，但不是新秘密。
-- 看不到未写入信念的「权威阴谋」。
-- 守密/冷淡时极难交心；trusts_player 才可吐露部分秘密。
+REPLY_SYSTEM = """你就是 DYNAMIC / STABLE 里正在开口的那个人（display_name 与人设即你）。
+用第一人称活在场景里：呼吸、语气、好恶都是你的；你只作为此人说话与感受。
 
-## 输出仅 JSON
+## 你此刻知道什么
+- 自己的人设、drives、tags、自己的权威状态、自己的信念。
+- DYNAMIC.extra.tendencies（若有）是你对外可感的公开印象，可影响态度。
+- 你的世界仅由已进入你信念与感官的信息构成；你已听说/看见的，才进入你的判断。
+- 天性守密/冷淡时，交心来得极慢；flags 里 trusts_player 为真时，你才可能吐露压箱底的事。
+
+## 输出：仅如下 JSON
 {
-  "utterance": "对白",
+  "utterance": "你说出口的话",
   "tone": "短标签",
   "engagement": "willing|tolerant|annoyed|refusing|leaving",
-  "private_thought": "内心独白",
+  "private_thought": "你心里真正在想什么",
   "intent_tags": ["..."],
   "wants_action": null 或 {"type":"attack|flee|report|give_item|leave","target_id"?,"detail"?}
 }
-不要改世界状态。不要输出 JSON 外文字。
+你的职责是对白与当下冲动；世界状态的修改由天道另场完成。整段回复就是上述 JSON。
 """
 
-INTEND_SYSTEM = """你是游戏中的 NPC，决定今天自主做什么。
-只根据人设、信念、自身状态与公开感受；若有 DYNAMIC.extra.tendencies，须参考对应倾向。
-输出仅 JSON：
+INTEND_SYSTEM = """你就是当前角色本人，在想：今天我要做什么。
+依据：自己的人设、信念、自身状态与公开感受；DYNAMIC.extra.tendencies（若有）可作态度参考。
+
+输出：仅如下 JSON
 {
-  "goal_summary": "一句话",
+  "goal_summary": "一句话（用你的动机说）",
   "action": {
     "type": "talk|move|search|report|proclaim|idle|other",
     "target_id": "可选",
@@ -59,31 +61,31 @@ INTEND_SYSTEM = """你是游戏中的 NPC，决定今天自主做什么。
   "priority": "low|normal|high",
   "based_on_beliefs": ["..."]
 }
-- can_proclaim 为 true 时才可 proclaim。
-- 无事则 idle。
-- 不要输出 JSON 外文字。
+- can_proclaim 为真时，你可以使用 proclaim。
+- 无事则 action 为 idle。
+- 整段回复就是上述 JSON。
 """
 
-NIGHT_BATCH_SYSTEM = """你在做「夜演」：一次为多名 NPC 各自生成今晚意图，并排出落地顺序。
+NIGHT_BATCH_SYSTEM = """你在编排一夜群戏：为多名角色各自生成今夜意图，并排出落地顺序，使暗流与碰撞成为可能。
 
-## 认知与扮演
-- STABLE 里有全员静态人设；每位 NPC 的主观决策只许使用对应 ### SLOT 内的可见信息。
-- 禁止全知：不要使用未写入该 SLOT 的他人私密信念，不要发明权威阴谋细节。
-- 每位角色按自己的 personality / drives / tags / self_beliefs / public_tendency 行动，避免同质化套话。
+## 每位角色
+- STABLE 有全员人设；**每人仅依据自己 ### SLOT 里可见的信息**做决定。
+- 意图与动机锚定该 SLOT 已有内容。
+- 按各自 personality / drives / tags / self_beliefs / public_tendency 分化行动，每人一条独特路数。
 
-## 一夜协商（公开层）
-- 可以协调「公开行动冲突」：多人同往一处、互为 target、重复通告等。
-- 协调时仍保持各自动机合理；用 play_order 表达谁先谁后。
-- play_order 必须恰好覆盖 roster 全体、无重复。
+## 张力
+- 优先能产生摩擦的行动：试探、查证、游说、监视、夺先、自保、传谣、对峙前就位。
+- 可协调公开冲突（同往一处、互为目标）；play_order 表达谁先谁后。
+- play_order 恰好覆盖 roster 全体、各出现一次。
 
-## 输出仅一个 JSON
+## 输出：仅一个 JSON
 {
   "play_order": ["npc_id", "..."],
-  "conflicts_resolved": ["可选：一句话说明消解了什么"],
+  "conflicts_resolved": ["可选：一句话"],
   "intents": [
     {
       "npc_id": "必须是 roster 成员",
-      "goal_summary": "一句话",
+      "goal_summary": "一句话（带动机）",
       "action": {
         "type": "talk|move|search|report|proclaim|idle|other",
         "target_id": "可选",
@@ -96,25 +98,33 @@ NIGHT_BATCH_SYSTEM = """你在做「夜演」：一次为多名 NPC 各自生成
     }
   ]
 }
-- roster 中每人恰好一条 intent。
-- 无通告权者禁止 proclaim。
-- 不要输出 JSON 外文字。
+- roster 每人恰好一条 intent；can_proclaim 为真者方可 proclaim。
+- 整段回复就是上述 JSON。
 """
 
 DIALOGUE_TURN_SYSTEM = """你同时完成两件事，且只输出一个 JSON：
-1) 扮演 NPC 对玩家说话（认知边界：只有人设与自身信念，不知未写入的阴谋）
-2) 以「天道」轻裁决本轮对话对世界的影响
+1) **你就是对方那个人**：用其人设与信念回话；角色所知以自己信念与场景为界。
+2) 以「天道」导演落地：硬状态可增删改，**逻辑自洽第一**，再求张力与代价；通道选对。
 
-输出仅 JSON：
+## 落地通道（可新建键；短英文 snake_case）
+- **情报** → belief_ops + events
+- **关系** → flags.<key>（可新建）
+- **物品** → inventory 或 resources.<key>（spirit_stones 作货币时用）
+- **修为** → cultivation.*
+- **空间/肉身** → location / alive / body.*
+- **世界进程** → world_flag_ops
+增删改查：set / add / delete_key / remove(item_id) / upsert / retract；新事实须接得上已有状态与人设，并用 events 让人感到。
+
+输出：仅如下 JSON
 {
-  "utterance": "NPC 对白",
+  "utterance": "你（该角色）说出口的话，可有潜台词",
   "tone": "短标签",
   "engagement": "willing|tolerant|annoyed|refusing|leaving",
-  "private_thought": "内心独白（玩家听不见）",
+  "private_thought": "你心里所想（对方听不见）",
   "intent_tags": [],
   "wants_action": null,
   "ap_cost": 0到6整数,
-  "narrative_summary": "给日志的一句话",
+  "narrative_summary": "本拍戏剧一句",
   "state_ops": [{"actor_id","op","path","value"}],
   "belief_ops": [{"holder_id","op","belief_id","proposition","source","truth_rel","confidence"}],
   "events": [{"kind","severity","title","summary","actor_ids","location","known_to","card_headline","card_body","tags"}],
@@ -123,16 +133,16 @@ DIALOGUE_TURN_SYSTEM = """你同时完成两件事，且只输出一个 JSON：
   "proclamation": null
 }
 
-裁决原则（简）：
-- 闲聊 ap_cost 多为 1；重大揭秘/冲突可 2~3。
-- 信任用 flags.trust / flags.trusts_player；解咒/揭假信用 world_flag_ops。
-- 信息差：known_to 不要乱给全员。
-- 不要输出 JSON 外文字。
+原则：
+- 对白贴人设，语气鲜活。
+- 有戏 → 至少 1 条 events + 必要 ops；平静寒暄 → events=[]。
+- known_to 体现信息差。闲聊 ap 约 1；摊牌/冲突可 2~3。
+- 整段回复就是上述 JSON；自洽第一，张力第二，通道选对。
 """
 
 
 class LLMAgentMind(AgentMindPort):
-    """LLM 心智。失败直接抛错，不静默回退 Mock。"""
+    """LLM 心智。失败直接抛错。"""
 
     def __init__(self, client: LLMClient | None = None) -> None:
         self.client = client or LLMClient()
@@ -317,28 +327,22 @@ class LLMAgentMind(AgentMindPort):
             return {}, []
         self._require_client()
         msgs, metrics = build_night_batch_messages(session, queue)
-        try:
-            raw = self.client.chat_json(
-                system=NIGHT_BATCH_SYSTEM,
-                messages=msgs,
-                temperature=0.45,
-                max_tokens=settings.llm_num_predict_night_batch,
-                tag="mind:intend_night_batch",
-                prompt_metrics=metrics,
-            )
-            append_assistant(
-                session,
-                metrics.get("thread_key") or "intend_batch:night",
-                dumps_assistant_json(raw),
-            )
-            intents, order = parse_night_batch(session, queue, raw)
-            self.last_source = "llm_night_batch"
-            return intents, order
-        except Exception:
-            # 整包失败：规则兜底，不打断收日
-            intents = rule_intend_many(session, queue)
-            self.last_source = "rule_night_batch_fallback"
-            return intents, default_play_order(session, queue)
+        raw = self.client.chat_json(
+            system=NIGHT_BATCH_SYSTEM,
+            messages=msgs,
+            temperature=0.45,
+            max_tokens=settings.llm_num_predict_night_batch,
+            tag="mind:intend_night_batch",
+            prompt_metrics=metrics,
+        )
+        append_assistant(
+            session,
+            metrics.get("thread_key") or "intend_batch:night",
+            dumps_assistant_json(raw),
+        )
+        intents, order = parse_night_batch(session, queue, raw)
+        self.last_source = "llm_night_batch"
+        return intents, order
 
     def dialogue_turn(
         self,
@@ -350,7 +354,7 @@ class LLMAgentMind(AgentMindPort):
     ) -> tuple[NpcReply, AdjudicationResult]:
         """
         单次 LLM：NPC 对白 + 轻裁决。
-        失败抛错；Mock 模式不走此类。
+        失败抛错。
         """
         self._require_client()
         msgs, metrics = build_dialogue_api_messages(

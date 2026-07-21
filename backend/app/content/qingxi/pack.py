@@ -213,11 +213,3 @@ class QingxiWorldPack(WorldPack):
             "notes": [],
         }
 
-    def evaluate_ending_tags(self, session: Any) -> list[str]:
-        tags = ["青溪一宿"]
-        if session.day >= session.rules.max_days:
-            tags.append("继续赶路")
-        st = session.states.get("player")
-        if st and st.flags.get("expelled"):
-            tags.append("被赶出驿站")
-        return tags
