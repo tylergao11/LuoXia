@@ -85,8 +85,10 @@ infra/        存档 · LLM
 ## 遭遇 / 弹窗模块（表现）
 
 - **遭遇权威**：开打、对拼结算、写回只走意图 → ContentPacket / Applier；前端不算胜负。  
-- **动作**：`ActionType.encounter`（payload.`op` = `start` | `pick` | `confirm` | `cancel`）。  
-- **状态**：`world_flags.active_encounter`（不对客户端当真相表露出；经 `SessionView.encounter` 投影）。  
+- **动作**：`ActionType.encounter`（payload.`op` = `start` | `pick` | `confirm` | `cancel` | `dismiss_offer`）。  
+- **状态**：`world_flags.active_encounter`（经 packet 写入；`None` 表示删除）；经 `SessionView.encounter` 投影。  
+- **要约**：天道 `ui_hints.propose_encounter` → `graph_meta.encounter_offer` → `SessionView.encounter_offer`（应战/罢议）；**禁止**模型直写 `active_encounter`。  
+- **小招目录**：开战时 `WorldPack.encounter_build_catalogs`（可 LLM + 校验回退）写入 `active_encounter.player_catalog` / `foe_catalog`；战斗中只用 blob，不再生成。  
 - **弹窗「画」面**：通用 **stage 模块槽**（按 id 加载：交锋 / 奇遇 / 武学 / …）；模块只做表现与操作回传，不进 core。  
 - 落霞交锋规则与词条表见 `docs/luoxia.md` §10；引擎不 import 内容包招式名（经 WorldPack.`encounter_*`）。
 

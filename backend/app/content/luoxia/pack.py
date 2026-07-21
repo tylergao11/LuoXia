@@ -350,6 +350,46 @@ class LuoxiaWorldPack(WorldPack):
             inv, foe_fallback=(actor_id != pid)
         )
 
+    def encounter_build_catalogs(
+        self, session: Any, player_id: str, foe_id: str
+    ) -> tuple:
+        """开战：LLM 花式小招 + 校验回退规则组合。"""
+        from app.content.luoxia import duel_demo, duel_moves_llm
+
+        p_st = session.states.get(player_id)
+        f_st = session.states.get(foe_id)
+        p_arts = duel_demo.arts_from_inventory(p_st.inventory if p_st else None)
+        f_arts = duel_demo.arts_from_inventory(f_st.inventory if f_st else None)
+        if not f_arts:
+            f_arts = [dict(duel_demo.NPC_BASIC_ART)]
+
+        llm = None
+        try:
+            from app.container import get_container
+
+            llm = getattr(get_container(), "llm", None)
+        except Exception:
+            llm = None
+
+        realm_p = str((p_st.cultivation or {}).get("realm") or "") if p_st else ""
+        realm_f = str((f_st.cultivation or {}).get("realm") or "") if f_st else ""
+        p_cat = duel_moves_llm.generate_moves_for_arts(
+            p_arts, llm_client=llm, realm=realm_p
+        )
+        f_cat = duel_moves_llm.generate_moves_for_arts(
+            f_arts, llm_client=llm, realm=realm_f
+        )
+        note = "（小招已按功法演成）" if llm and getattr(llm, "available", False) else ""
+        if not p_cat:
+            p_cat = duel_demo.moves_for_actor_inventory(
+                p_st.inventory if p_st else None, foe_fallback=False
+            )
+        if not f_cat:
+            f_cat = duel_demo.moves_for_actor_inventory(
+                f_st.inventory if f_st else None, foe_fallback=True
+            )
+        return p_cat, f_cat, note
+
     def encounter_ensure_default_art_packet(self, session: Any) -> dict:
         """开战时若无默认功法则补发（旧存档）。"""
         from app.content.luoxia import duel_demo
@@ -383,7 +423,20 @@ class LuoxiaWorldPack(WorldPack):
         return duel_demo.cultivation_amp(cultivation)
 
     def dynamic_prompt_extra(self, session: Any) -> dict:
-        return {}
+        from app.content.luoxia import duel_demo
+
+        return {
+            "combat": {
+                "has_duel": True,
+                "tag_alphabet": list(duel_demo.TAG_ALPHABET.keys()),
+                "propose_encounter": {
+                    "kind": "duel",
+                    "fields": ["foe_id", "reason"],
+                    "via": "ui_hints.propose_encounter",
+                },
+                "forbid": ["world_flag_ops.active_encounter", "keyword_open_fight"],
+            }
+        }
 
     def enrich_dynamic_extra(
         self,

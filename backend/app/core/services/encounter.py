@@ -34,11 +34,14 @@ def handle_encounter(
     if op == "start":
         return _start(session, req, pack, applier)
     if op == "pick":
-        return _pick(session, req, pack)
+        return _pick(session, req, pack, applier)
     if op == "confirm":
         return _confirm(session, req, pack, applier)
     if op == "cancel":
         return _cancel(session, applier)
+    if op == "dismiss_offer":
+        session.graph_meta.pop("encounter_offer", None)
+        return ActionResult(ok=True, message="罢议", session=session)
     return ActionResult(
         ok=False,
         message=f"未知交锋操作: {op}",
@@ -47,18 +50,46 @@ def handle_encounter(
     )
 
 
-def _player_moves(session: GameSession, pack: WorldPack) -> list[dict[str, Any]]:
+def _player_moves(
+    session: GameSession, pack: WorldPack, blob: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    if isinstance(blob, dict) and isinstance(blob.get("player_catalog"), list):
+        return list(blob["player_catalog"])
     fn = getattr(pack, "encounter_moves_for", None)
     if callable(fn):
         return list(fn(session, session.player_id()) or [])
     return list(pack.encounter_move_catalog() or [])
 
 
-def _foe_moves(session: GameSession, pack: WorldPack, foe_id: str) -> list[dict[str, Any]]:
+def _foe_moves(
+    session: GameSession,
+    pack: WorldPack,
+    foe_id: str,
+    blob: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if isinstance(blob, dict) and isinstance(blob.get("foe_catalog"), list):
+        return list(blob["foe_catalog"])
     fn = getattr(pack, "encounter_moves_for", None)
     if callable(fn):
         return list(fn(session, foe_id) or [])
     return list(pack.encounter_move_catalog() or [])
+
+
+def _build_catalogs(
+    session: GameSession, pack: WorldPack, pid: str, foe_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """委托 WorldPack 生成小招目录（内容包可走 LLM+回退）；引擎不 import 招式表。"""
+    fn = getattr(pack, "encounter_build_catalogs", None)
+    if callable(fn):
+        out = fn(session, pid, foe_id)
+        if isinstance(out, (list, tuple)) and len(out) >= 2:
+            p_cat = list(out[0] or [])
+            f_cat = list(out[1] or [])
+            note = str(out[2]) if len(out) > 2 else ""
+            return p_cat, f_cat, note
+    p_cat = _player_moves(session, pack)
+    f_cat = _foe_moves(session, pack, foe_id)
+    return p_cat, f_cat, ""
 
 
 def project_encounter_view(session: GameSession, pack: WorldPack | None) -> dict[str, Any] | None:
@@ -73,7 +104,11 @@ def project_encounter_view(session: GameSession, pack: WorldPack | None) -> dict
     foe_name = (
         session.profiles[foe_id].display_name if foe_id in session.profiles else "对手"
     )
-    catalog = _player_moves(session, pack) if pack is not None else []
+    catalog = (
+        _player_moves(session, pack, raw)
+        if pack is not None
+        else list(raw.get("player_catalog") or [])
+    )
     art_names: list[str] = []
     st = session.states.get(pid)
     for it in (st.inventory if st else None) or []:
@@ -95,7 +130,47 @@ def project_encounter_view(session: GameSession, pack: WorldPack | None) -> dict
         "stage_module": "duel",
         "self_mark": (self_name or "我")[:1],
         "foe_mark": (foe_name or "敌")[:1],
+        "max_hands": MAX_HANDS,
+        "tag_hints": {
+            "strike": "攻",
+            "guard": "守",
+            "break": "破",
+            "bind": "缠",
+            "reflect": "反",
+            "drain": "耗",
+        },
     }
+
+
+def project_encounter_offer(session: GameSession) -> dict[str, Any] | None:
+    raw = (session.graph_meta or {}).get("encounter_offer")
+    if not isinstance(raw, dict):
+        return None
+    if str(raw.get("kind") or "duel") != "duel":
+        return None
+    foe_id = str(raw.get("foe_id") or "").strip()
+    if not foe_id or foe_id not in session.profiles:
+        return None
+    return {
+        "kind": "duel",
+        "foe_id": foe_id,
+        "foe_name": session.profiles[foe_id].display_name,
+        "reason": str(raw.get("reason") or ""),
+    }
+
+
+def _set_encounter_flag(
+    session: GameSession,
+    applier: StateApplier,
+    blob: dict[str, Any] | None,
+    *,
+    events: list[WorldEvent] | None = None,
+) -> list[WorldEvent]:
+    packet = empty_packet()
+    packet["world_flag_ops"][ENCOUNTER_FLAG] = blob
+    for ev in events or []:
+        packet["events"].append(ev)
+    return list(apply_packet(session, packet, applier=applier) or [])
 
 
 def _start(
@@ -104,7 +179,7 @@ def _start(
     pack: WorldPack,
     applier: StateApplier,
 ) -> ActionResult:
-    if (session.world_flags or {}).get(ENCOUNTER_FLAG):
+    if isinstance((session.world_flags or {}).get(ENCOUNTER_FLAG), dict):
         return ActionResult(
             ok=False,
             message="已在交锋之中",
@@ -143,7 +218,6 @@ def _start(
             error_code="NOT_HERE",
         )
 
-    # 旧存档无默认功法：开战时补发客途吐纳诀
     grant_note = ""
     ensure = getattr(pack, "encounter_ensure_default_art_packet", None)
     if callable(ensure):
@@ -152,7 +226,7 @@ def _start(
             apply_packet(session, packet, applier=applier)
             grant_note = "（已执出客途吐纳诀）"
 
-    catalog = _player_moves(session, pack)
+    catalog, foe_catalog, gen_note = _build_catalogs(session, pack, pid, foe_id)
     if not catalog:
         return ActionResult(
             ok=False,
@@ -160,7 +234,6 @@ def _start(
             session=session,
             error_code="NO_ART",
         )
-    foe_catalog = _foe_moves(session, pack, foe_id)
     if not foe_catalog:
         return ActionResult(
             ok=False,
@@ -179,16 +252,40 @@ def _start(
         "foe_qi_max": foe_qi_max,
         "player_moves": [],
         "foe_moves": [],
+        "player_catalog": catalog,
+        "foe_catalog": foe_catalog,
         "player_amp": float(pack.encounter_cultivation_amp(dict(p_st.cultivation or {}))),
         "foe_amp": float(pack.encounter_cultivation_amp(dict(f_st.cultivation or {}))),
         "seed": random.randint(1, 10_000_000),
     }
-    session.world_flags[ENCOUNTER_FLAG] = blob
     foe_name = session.profiles[foe_id].display_name
+    self_name = session.profiles[pid].display_name if pid in session.profiles else "客卿"
+    loc = p_st.location
+    open_ev = WorldEvent(
+        event_id=f"duel_open_{uuid.uuid4().hex[:10]}",
+        day=session.day,
+        kind=EventKind.CONFLICT,
+        severity=Severity.MINOR,
+        title="对峙约战",
+        summary=f"{self_name}与{foe_name}气机相交，将分高下。",
+        card_headline="对峙",
+        card_body=(
+            f"{self_name}与{foe_name}在此对峙。气机已满，只待出招。"
+            f"{grant_note}{gen_note}"
+        ),
+        location=loc,
+        actor_ids=[pid, foe_id],
+        involves_player=True,
+        known_to=[pid, foe_id],
+        tags=["combat", "duel", "open"],
+    )
+    created = _set_encounter_flag(session, applier, blob, events=[open_ev])
+    session.graph_meta.pop("encounter_offer", None)
     return ActionResult(
         ok=True,
-        message=f"与{foe_name}对峙，气机已满。点选小招后确定。{grant_note}",
+        message=f"与{foe_name}对峙，气机已满。点选小招后确定。{grant_note}{gen_note}",
         session=session,
+        new_events=list(created or [open_ev]),
     )
 
 
@@ -196,6 +293,7 @@ def _pick(
     session: GameSession,
     req: ActionRequest,
     pack: WorldPack,
+    applier: StateApplier,
 ) -> ActionResult:
     blob = _require_blob(session)
     if blob is None:
@@ -207,7 +305,7 @@ def _pick(
             ok=False, message="此刻不可改招", session=session, error_code="BAD_PHASE"
         )
 
-    catalog = _player_moves(session, pack)
+    catalog = _player_moves(session, pack, blob)
     moves = (req.payload or {}).get("moves")
     if not isinstance(moves, list):
         return ActionResult(
@@ -240,8 +338,9 @@ def _pick(
             error_code="NO_QI",
         )
 
-    blob["player_moves"] = cleaned
-    session.world_flags[ENCOUNTER_FLAG] = blob
+    next_blob = dict(blob)
+    next_blob["player_moves"] = cleaned
+    _set_encounter_flag(session, applier, next_blob)
     return ActionResult(ok=True, message="已记下招式次序", session=session)
 
 
@@ -261,16 +360,17 @@ def _confirm(
             ok=False, message="交锋已定", session=session, error_code="BAD_PHASE"
         )
 
-    catalog = _player_moves(session, pack)
+    catalog = _player_moves(session, pack, blob)
     player_moves = list(blob.get("player_moves") or [])
     if not player_moves:
         raw = (req.payload or {}).get("moves")
         if isinstance(raw, list) and raw:
-            pick = _pick(session, req, pack)
+            pick = _pick(session, req, pack, applier)
             if not pick.ok:
                 return pick
             blob = _require_blob(session) or {}
             player_moves = list(blob.get("player_moves") or [])
+            catalog = _player_moves(session, pack, blob)
     if not player_moves:
         return ActionResult(
             ok=False, message="尚未点选招式", session=session, error_code="EMPTY"
@@ -278,9 +378,8 @@ def _confirm(
 
     by_id = {m["move_id"]: m for m in catalog}
     foe_id = str(blob.get("foe_id") or "")
-    foe_catalog = _foe_moves(session, pack, foe_id)
+    foe_catalog = _foe_moves(session, pack, foe_id, blob)
     foe_by_id = {m["move_id"]: m for m in foe_catalog}
-    # 合并字典供结算查名（双方招式 id 不重叠则安全）
     resolve_by_id = {**foe_by_id, **by_id}
 
     foe_qi_max = int(blob.get("foe_qi_max") or blob.get("qi_max") or 5)
@@ -336,6 +435,7 @@ def _confirm(
         title="演武交锋",
         summary=summary,
         card_body=card,
+        card_headline="交锋",
         location=session.states[pid].location,
         actor_ids=[pid, foe_id] if foe_id else [pid],
         involves_player=True,
@@ -347,6 +447,7 @@ def _confirm(
     applied = apply_packet(session, packet, applier=applier)
     if session.world_flags.get(ENCOUNTER_FLAG) is None:
         session.world_flags.pop(ENCOUNTER_FLAG, None)
+    session.graph_meta.pop("encounter_offer", None)
     return ActionResult(
         ok=True,
         message=summary,
@@ -356,13 +457,15 @@ def _confirm(
 
 
 def _cancel(session: GameSession, applier: StateApplier) -> ActionResult:
-    if not (session.world_flags or {}).get(ENCOUNTER_FLAG):
+    if not isinstance((session.world_flags or {}).get(ENCOUNTER_FLAG), dict):
+        session.graph_meta.pop("encounter_offer", None)
         return ActionResult(ok=True, message="并无交锋", session=session)
     packet = empty_packet()
     packet["world_flag_ops"][ENCOUNTER_FLAG] = None
     apply_packet(session, packet, applier=applier)
     if session.world_flags.get(ENCOUNTER_FLAG) is None:
         session.world_flags.pop(ENCOUNTER_FLAG, None)
+    session.graph_meta.pop("encounter_offer", None)
     return ActionResult(ok=True, message="收势罢手", session=session)
 
 
@@ -397,7 +500,6 @@ def _ai_pick(
         picked.append(str(m["move_id"]))
         spent += cost
     if not picked and catalog:
-        # 至少一手最便宜的
         cheapest = min(catalog, key=lambda x: int(x.get("qi_cost") or 1))
         if int(cheapest.get("qi_cost") or 1) <= qi_max:
             picked = [str(cheapest["move_id"])]
@@ -420,6 +522,7 @@ def _resolve_clash(
     p_amp: float,
     f_amp: float,
 ) -> tuple[int, int, list[str]]:
+    """词条博弈 + 修为放大；比手得分。"""
     n = max(len(player_ids), len(foe_ids), 1)
     p_score = 0
     f_score = 0
@@ -434,26 +537,79 @@ def _resolve_clash(
         p_tags = set(pm.get("tags") or []) if pm else set()
         f_tags = set(fm.get("tags") or []) if fm else set()
 
-        # 词条：破势压守；缠丝略削对方攻
+        notes: list[str] = []
+
         if "break" in p_tags:
             f_guard = max(0.0, f_guard - 1.5 * p_amp)
         if "break" in f_tags:
             p_guard = max(0.0, p_guard - 1.5 * f_amp)
-        if "bind" in p_tags:
+        if "bind" in p_tags or "seal" in p_tags:
             f_strike = max(0.0, f_strike - 1.0 * p_amp)
-        if "bind" in f_tags:
+        if "bind" in f_tags or "seal" in f_tags:
             p_strike = max(0.0, p_strike - 1.0 * f_amp)
+        if "drain" in p_tags or "poison" in p_tags:
+            f_strike = max(0.0, f_strike - 1.2 * p_amp)
+        if "drain" in f_tags or "poison" in f_tags:
+            p_strike = max(0.0, p_strike - 1.2 * f_amp)
+        if "pierce" in p_tags:
+            f_guard = max(0.0, f_guard * 0.55)
+            notes.append("透")
+        if "pierce" in f_tags:
+            p_guard = max(0.0, p_guard * 0.55)
+        if "crush" in p_tags or "heavy" in p_tags:
+            p_strike += 0.6 * p_amp
+        if "crush" in f_tags or "heavy" in f_tags:
+            f_strike += 0.6 * f_amp
+        if "swift" in p_tags or "feint" in p_tags:
+            p_strike += 0.35 * p_amp
+            f_guard = max(0.0, f_guard - 0.4 * p_amp)
+        if "swift" in f_tags or "feint" in f_tags:
+            f_strike += 0.35 * f_amp
+            p_guard = max(0.0, p_guard - 0.4 * f_amp)
+        if "evade" in p_tags or "cloak" in p_tags:
+            p_guard += 0.9 * p_amp
+        if "evade" in f_tags or "cloak" in f_tags:
+            f_guard += 0.9 * f_amp
+        if "suppress" in p_tags:
+            f_strike = max(0.0, f_strike - 0.7 * p_amp)
+            f_guard = max(0.0, f_guard - 0.5 * p_amp)
+        if "suppress" in f_tags:
+            p_strike = max(0.0, p_strike - 0.7 * f_amp)
+            p_guard = max(0.0, p_guard - 0.5 * f_amp)
+        if "rally" in p_tags or "mend" in p_tags:
+            p_guard += 0.5 * p_amp
+        if "rally" in f_tags or "mend" in f_tags:
+            f_guard += 0.5 * f_amp
+        if "shock" in p_tags:
+            p_strike += 0.5 * p_amp
+            f_guard = max(0.0, f_guard - 0.3 * p_amp)
+        if "shock" in f_tags:
+            f_strike += 0.5 * f_amp
+            p_guard = max(0.0, p_guard - 0.3 * f_amp)
+        if "chain" in p_tags:
+            p_strike += 0.4 * p_amp
+        if "chain" in f_tags:
+            f_strike += 0.4 * f_amp
 
         p_power = p_strike - f_guard
         f_power = f_strike - p_guard
+
+        if "reflect" in p_tags:
+            p_power -= 0.8 * p_amp
+            notes.append("反噬")
+        if "reflect" in f_tags:
+            f_power -= 0.8 * f_amp
+            notes.append("反噬")
+
         pn = (pm or {}).get("name") or "空"
         fn = (fm or {}).get("name") or "空"
+        suffix = f"（{'·'.join(notes)}）" if notes else ""
         if p_power > f_power + 0.05:
             p_score += 1
-            lines.append(f"第{i + 1}手：你「{pn}」压过「{fn}」")
+            lines.append(f"第{i + 1}手：你「{pn}」压过「{fn}」{suffix}")
         elif f_power > p_power + 0.05:
             f_score += 1
-            lines.append(f"第{i + 1}手：对方「{fn}」压过「{pn}」")
+            lines.append(f"第{i + 1}手：对方「{fn}」压过「{pn}」{suffix}")
         else:
-            lines.append(f"第{i + 1}手：「{pn}」与「{fn}」相持")
+            lines.append(f"第{i + 1}手：「{pn}」与「{fn}」相持{suffix}")
     return p_score, f_score, lines

@@ -227,41 +227,48 @@ class WorldEvolveStepper:
         index = int(session.evolve_index or 0)
 
         if session.phase == GamePhase.GAME_OVER:
-            session.evolve_index = index
-            self.repo.save(session)
-            return {
-                "index": index,
-                "queue": queue,
-                "done": True,
-                "message": session.game_over_reason or "尘缘已尽",
-                "last_actor_id": "",
-            }
+            return self.rollover(session_id)
 
-        if index >= len(queue):
-            return {
-                "index": index,
-                "queue": queue,
-                "done": False,
-                "message": "夜事将尽，待收日",
-                "last_actor_id": "",
-            }
+        # 队列已尽：必须收日，禁止停在 WORLD_EVOLVE 让前端无限「续观」
+        if not queue or index >= len(queue):
+            return self.rollover(session_id)
 
         npc_id = queue[index]
-        intent = self._resolve_intent(session, npc_id)
-        action = intent.action or {}
-        atype = str(action.get("type") or "idle")
+        skip_note = ""
+        intent: NpcIntent
+        try:
+            intent = self._resolve_intent(session, npc_id)
+            action = intent.action or {}
+            atype = str(action.get("type") or "idle")
 
-        if atype == "idle":
-            pass
-        elif atype == "move" and action.get("location"):
-            ok = self._apply_simple_move(
-                session,
-                npc_id,
-                str(action.get("location")),
-                intent.goal_summary or "",
-            )
-            if not ok:
-                # 非法移动回退裁决
+            if atype == "idle":
+                pass
+            elif atype == "move" and action.get("location"):
+                ok = self._apply_simple_move(
+                    session,
+                    npc_id,
+                    str(action.get("location")),
+                    intent.goal_summary or "",
+                )
+                if not ok:
+                    material = {
+                        "type": "npc_action",
+                        "npc_id": npc_id,
+                        "intent": intent.model_dump(mode="json"),
+                    }
+                    adj = self.adjudicator.adjudicate(
+                        session,
+                        actor_ids=[npc_id],
+                        current_material=material,
+                        phase="world_evolve",
+                    )
+                    adj.ap_cost = 0
+                    self.applier.apply(session, adj)
+            else:
+                actor_ids = [npc_id]
+                tid = action.get("target_id")
+                if tid:
+                    actor_ids.append(str(tid))
                 material = {
                     "type": "npc_action",
                     "npc_id": npc_id,
@@ -269,30 +276,21 @@ class WorldEvolveStepper:
                 }
                 adj = self.adjudicator.adjudicate(
                     session,
-                    actor_ids=[npc_id],
+                    actor_ids=actor_ids,
                     current_material=material,
                     phase="world_evolve",
                 )
                 adj.ap_cost = 0
                 self.applier.apply(session, adj)
-        else:
-            actor_ids = [npc_id]
-            tid = action.get("target_id")
-            if tid:
-                actor_ids.append(str(tid))
-            material = {
-                "type": "npc_action",
-                "npc_id": npc_id,
-                "intent": intent.model_dump(mode="json"),
-            }
-            adj = self.adjudicator.adjudicate(
-                session,
-                actor_ids=actor_ids,
-                current_material=material,
-                phase="world_evolve",
+        except Exception as e:  # noqa: BLE001 — 单步失败必须推进，否则夜色卡死
+            skip_note = f"略过（{type(e).__name__}）"
+            intent = NpcIntent(
+                npc_id=npc_id,
+                goal_summary=skip_note,
+                action={"type": "idle"},
+                priority="low",
+                based_on_beliefs=[],
             )
-            adj.ap_cost = 0
-            self.applier.apply(session, adj)
 
         index += 1
         session.evolve_index = index
@@ -307,10 +305,25 @@ class WorldEvolveStepper:
             else npc_id
         )
         goal = (intent.goal_summary or "").strip()
-        if goal:
+        if skip_note:
+            msg = f"夜色流转 · {index}/{len(queue)} · {name} · {skip_note}"
+        elif goal:
             msg = f"夜色流转 · {index}/{len(queue)} · {name} · {goal}"
         else:
             msg = f"夜色流转 · {index}/{len(queue)} · {name}"
+
+        # 本步之后已队尽：同一请求内收日，避免再点一次「续观」
+        if index >= len(queue):
+            roll = self.rollover(session_id)
+            roll_msg = roll.get("message") or "破晓"
+            return {
+                "index": index,
+                "queue": queue,
+                "done": True,
+                "message": f"{msg} · {roll_msg}",
+                "last_actor_id": npc_id,
+                "error": roll.get("error") or "",
+            }
 
         return {
             "index": index,

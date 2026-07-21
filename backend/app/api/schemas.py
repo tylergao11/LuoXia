@@ -47,3 +47,5 @@ class SessionView(BaseModel):
     chat_by_actor: dict[str, Any] = Field(default_factory=dict)
     # 进行中的交锋/遭遇（无则 null）；前端按 stage_module 加载画模块
     encounter: dict[str, Any] | None = None
+    # 天道提出的应战要约（未开战）；点切磋/应战走 encounter/start
+    encounter_offer: dict[str, Any] | None = None

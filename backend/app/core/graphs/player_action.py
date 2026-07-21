@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, StateGraph  # noqa: F401 — END used below
 
 from app.core.domain.enums import GamePhase
 from app.core.ports.adjudicator import AdjudicatorPort
@@ -22,6 +22,39 @@ class PlayerActionState(TypedDict, total=False):
     narrative: str
     ap_cost: int
     error: str
+
+
+def _apply_encounter_offer(session: Any, adj: Any, *, default_foe: str = "") -> None:
+    """天道 ui_hints.propose_encounter → graph_meta.encounter_offer（不直接开打）。"""
+    hints = getattr(adj, "ui_hints", None) or {}
+    if not isinstance(hints, dict):
+        return
+    prop = hints.get("propose_encounter")
+    if not isinstance(prop, dict):
+        return
+    if str(prop.get("kind") or "duel") != "duel":
+        return
+    pid = session.player_id()
+    foe_id = str(prop.get("foe_id") or default_foe or "").strip()
+    if not foe_id or foe_id == pid:
+        return
+    if foe_id not in session.profiles or foe_id not in session.states:
+        return
+    p_st = session.states.get(pid)
+    f_st = session.states.get(foe_id)
+    if not p_st or not f_st or not p_st.alive or not f_st.alive:
+        return
+    if (p_st.location or "") != (f_st.location or ""):
+        return
+    # 已在交锋中则忽略
+    raw = (session.world_flags or {}).get("active_encounter")
+    if isinstance(raw, dict):
+        return
+    session.graph_meta["encounter_offer"] = {
+        "kind": "duel",
+        "foe_id": foe_id,
+        "reason": str(prop.get("reason") or "")[:120],
+    }
 
 
 def build_player_action_graph(
@@ -191,6 +224,8 @@ def build_player_action_graph(
         session.graph_meta["last_new_events"] = [
             e.model_dump(mode="json") for e in (created or [])
         ]
+        # 天道 propose_encounter → 投影应战（不直接开打）
+        _apply_encounter_offer(session, adj, default_foe=state.get("target_id") or "")
         from app.core.services import chat_log
 
         # dialogue 字典：对白 + 封条 + 至多一条机械局势投影

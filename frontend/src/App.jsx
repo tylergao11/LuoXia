@@ -293,14 +293,17 @@ export default function App() {
     }
   }
 
-  /** 夜色步进：每请求一人/收日，直到离开 WORLD_EVOLVE */
+  /** 夜色步进：每请求一人/收日，直到离开 WORLD_EVOLVE（防卡死：无进度则停） */
   async function drainNight(sessionId, seedSession) {
     if (evolveBusyRef.current) return seedSession;
     evolveBusyRef.current = true;
     let cur = seedSession;
     try {
-      // 安全上限：队列 + 收日 + 余量
-      const maxSteps = Math.max(12, (cur?.evolve_queue?.length || 0) + 4);
+      const qLen = cur?.evolve_queue?.length || 0;
+      // 每人一步 + 收日 + 余量；宁多勿少，避免夜色弹窗无限「续观」
+      const maxSteps = Math.max(24, qLen + 8);
+      let lastKey = `${cur?.evolve_index ?? 0}/${qLen}`;
+      let stall = 0;
       for (let i = 0; i < maxSteps; i++) {
         if (!cur || cur.phase !== "WORLD_EVOLVE") break;
         const data = await api.action(sessionId, { type: "end_day" });
@@ -318,8 +321,18 @@ export default function App() {
           break;
         }
         if (data.session?.phase !== "WORLD_EVOLVE") {
-          if (data.message) pushLog(data.message);
           break;
+        }
+        const key = `${data.session?.evolve_index ?? 0}/${(data.session?.evolve_queue || []).length}`;
+        if (key === lastKey) {
+          stall += 1;
+          if (stall >= 2) {
+            pushLog("夜色步进无进展，已停止自动续推（可再点一次收日）");
+            break;
+          }
+        } else {
+          stall = 0;
+          lastKey = key;
         }
       }
       return cur;
@@ -639,6 +652,46 @@ export default function App() {
       <div className={`log-bar ${logLine ? "has-msg" : ""}`} role="status" aria-live="polite">
         <span className="log-bar-text">{logLine || " "}</span>
       </div>
+
+      {session?.encounter_offer && !session?.encounter && session.phase === "PLAYER_TURN" && !ended ? (
+        <div className="encounter-offer-bar" role="status">
+          <span className="encounter-offer-text">
+            天道见真章
+            {session.encounter_offer.foe_name
+              ? ` · 与${session.encounter_offer.foe_name}约战`
+              : ""}
+            {session.encounter_offer.reason
+              ? `（${session.encounter_offer.reason}）`
+              : ""}
+          </span>
+          <button
+            type="button"
+            className="primary"
+            disabled={loading}
+            onClick={() =>
+              doAction({
+                type: "encounter",
+                target_id: session.encounter_offer.foe_id,
+                payload: { op: "start", foe_id: session.encounter_offer.foe_id },
+              })
+            }
+          >
+            应战
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() =>
+              doAction({
+                type: "encounter",
+                payload: { op: "dismiss_offer" },
+              })
+            }
+          >
+            罢议
+          </button>
+        </div>
+      ) : null}
 
       {ended && (
         <div className="panel banner-panel ending-panel" style={{ borderColor: "var(--accent)" }}>

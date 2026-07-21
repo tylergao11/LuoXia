@@ -1425,6 +1425,26 @@ button.ghost {
   color: transparent;
 }
 
+.encounter-offer-bar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 0 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.encounter-offer-text {
+  flex: 1 1 140px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--text);
+}
+
 /* 此地：角色格 */
 .scene-head {
   flex-shrink: 0;

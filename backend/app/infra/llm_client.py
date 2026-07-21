@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.infra import llm_cache_log
+from app.infra import llm_cache_log, llm_trace
 
 logger = logging.getLogger("luoxia.llm")
 
@@ -149,7 +149,6 @@ class LLMClient:
                 c = api_msgs[-1].get("content") or ""
                 if _JSON_USER_TAIL.strip() not in c[-40:]:
                     api_msgs[-1]["content"] = c + _JSON_USER_TAIL
-            user_for_log = api_msgs[-1]["content"] if api_msgs else ""
             try:
                 content = self._complete_messages(
                     system_forced,
@@ -159,7 +158,7 @@ class LLMClient:
                     tag=tag,
                     prompt_metrics=prompt_metrics,
                 )
-                return parse_json_object(content)
+                obj = parse_json_object(content)
             except Exception as e:
                 logger.warning("[llm] chat_json multi fail tag=%s err=%s ; retry", tag, e)
                 content = self._complete_messages(
@@ -170,11 +169,20 @@ class LLMClient:
                     tag=f"{tag}:retry",
                     prompt_metrics=prompt_metrics,
                 )
-                return parse_json_object(content)
+                obj = parse_json_object(content)
+            self._maybe_trace(
+                tag=tag,
+                system=system_forced,
+                messages=api_msgs,
+                output=obj,
+                prompt_metrics=prompt_metrics,
+            )
+            return obj
 
         if user is None:
             raise ValueError("user or messages required")
         user_forced = user + _JSON_USER_TAIL
+        api_msgs = [{"role": "user", "content": user_forced}]
         try:
             content = self._complete(
                 system_forced,
@@ -184,7 +192,7 @@ class LLMClient:
                 tag=tag,
                 prompt_metrics=prompt_metrics,
             )
-            return parse_json_object(content)
+            obj = parse_json_object(content)
         except Exception as e:
             logger.warning("[llm] chat_json fail tag=%s err=%s ; retry", tag, e)
             content = self._complete(
@@ -195,7 +203,37 @@ class LLMClient:
                 tag=f"{tag}:retry",
                 prompt_metrics=prompt_metrics,
             )
-            return parse_json_object(content)
+            obj = parse_json_object(content)
+        self._maybe_trace(
+            tag=tag,
+            system=system_forced,
+            messages=api_msgs,
+            output=obj,
+            prompt_metrics=prompt_metrics,
+        )
+        return obj
+
+    def _maybe_trace(
+        self,
+        *,
+        tag: str,
+        system: str,
+        messages: list[dict[str, str]],
+        output: dict[str, Any],
+        prompt_metrics: dict[str, Any] | None,
+    ) -> None:
+        try:
+            llm_trace.record(
+                tag=tag,
+                system=system,
+                messages=messages,
+                output=output,
+                teacher_model=self.model,
+                prompt_metrics=prompt_metrics,
+                call_meta=self.last_meta if isinstance(self.last_meta, dict) else None,
+            )
+        except Exception as e:  # noqa: BLE001 — 轨迹失败不得影响对局
+            logger.warning("[llm] trace skip tag=%s err=%s", tag, e)
 
     def _complete(
         self,

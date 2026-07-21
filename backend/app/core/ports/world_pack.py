@@ -186,6 +186,20 @@ class WorldPack(ABC):
         """按持有功法解析小招；无功法时玩家空表、NPC 可回落底库。"""
         return []
 
+    def encounter_build_catalogs(
+        self, session: "GameSession", player_id: str, foe_id: str
+    ) -> tuple[list[dict], list[dict], str]:
+        """
+        开战时生成双方小招目录（可 LLM 花式 + 规则回退）。
+        返回 (player_catalog, foe_catalog, note)。
+        默认走 encounter_moves_for。
+        """
+        return (
+            self.encounter_moves_for(session, player_id),
+            self.encounter_moves_for(session, foe_id),
+            "",
+        )
+
     def encounter_qi_cap(self, cultivation: dict) -> int:
         """境界 → 本场气上限。"""
         return 5

@@ -39,6 +39,16 @@ SYSTEM = """你是「天道」——本局故事的**总导演兼裁决者**。
 5. **玩家能动**：把玩家言行酿成世界真实反应。
 6. **收束有戏**：终局意味来自本局走过来的状态与履历，仍须自洽。
 
+## 交锋遭遇（短对峙 · 气 + 功法小招）
+- 世界存在 **交锋**（演武/单挑/冲突升级）：先排手再对放，**不是**长回合战。
+- **胜负与伤势写回**不由叙事句决定，须走遭遇协议；你 **禁止** 用台词关键词或直接写 `world_flag_ops.active_encounter` 开打。
+- 张力足够（约战、动手、血仇摊牌、公开叫阵）时：
+  1. **必须**至少 1 条 `events`（冲突场面，known_to 含相关人）；
+  2. 可在 `ui_hints.propose_encounter` 提出开战建议：
+     `{"kind":"duel","foe_id":"<对手id>","reason":"短由"}`
+     引擎校验同地/存活后投影给玩家「应战」，**不**替你直接开打。
+- 平静寒暄才可 `events=[]`；**叫阵/单挑被无视** 不允许。
+
 ## 输入（素材，不是牢笼）
 - STABLE：背景、地图、静态人设（局内固定）
 - MEMORY：压缩记忆（若有）
@@ -108,6 +118,7 @@ SYSTEM = """你是「天道」——本局故事的**总导演兼裁决者**。
   "world_flag_ops": {},
   "ui_hints": {}
 }
+- ui_hints 可选 propose_encounter（见上）；**禁止** world_flag_ops 写入 active_encounter
 
 ### 字段细则
 - state_ops.op: set | add | remove | delete_key
@@ -154,8 +165,9 @@ def _phase_instruction(phase: str) -> str:
     return (
         "【本拍·导演+裁决】用 STABLE/MEMORY/DYNAMIC 与 current_material 开拍。"
         "放大本轮戏剧后果；硬变化须逻辑自洽，再求有趣。"
-        "有戏 → ops + events；平静寒暄 → events=[] 与合理 ap_cost。"
-        "自洽第一，张力第二，通道选对。"
+        "有戏 → ops + events；平静寒暄才可 events=[]。"
+        "玩家约战/单挑/动手 → 必须 events，并可 ui_hints.propose_encounter。"
+        "禁止 world_flag_ops.active_encounter；自洽第一，张力第二。"
     )
 
 
@@ -273,6 +285,10 @@ class LLMAdjudicator(AdjudicatorPort):
         proc = raw.get("proclamation")
         if proc is not None and not isinstance(proc, dict):
             proc = None
+        # 交锋权威只走 encounter 协议，禁止模型直写 active_encounter
+        wfo = dict(raw.get("world_flag_ops") or {})
+        wfo.pop("active_encounter", None)
+        hints = dict(raw.get("ui_hints") or {})
         return AdjudicationResult(
             narrative_summary=str(raw.get("narrative_summary") or ""),
             ap_cost=max(0, min(6, ap)),
@@ -281,6 +297,6 @@ class LLMAdjudicator(AdjudicatorPort):
             events=events,
             proclamation=proc,
             game_flags=dict(raw.get("game_flags") or {}),
-            world_flag_ops=dict(raw.get("world_flag_ops") or {}),
-            ui_hints=dict(raw.get("ui_hints") or {}),
+            world_flag_ops=wfo,
+            ui_hints=hints,
         )

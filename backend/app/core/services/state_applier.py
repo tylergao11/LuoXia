@@ -28,13 +28,18 @@ class StateApplier:
         result = self._proclamation.expand(session, result)
 
         # 世界 flags（diff 日志 append-only，供 LLM 动态区）
+        # value is None → 删除键（交锋清场等）
         for k, v in (result.world_flag_ops or {}).items():
             old = session.world_flags.get(k)
-            session.world_flags[k] = v
-            if old != v:
+            if v is None:
+                session.world_flags.pop(k, None)
+            else:
+                session.world_flags[k] = v
+            new = session.world_flags.get(k)
+            if old != new:
                 self._append_diff(
                     session,
-                    f"D{session.day} world.{k}: {old!r} -> {v!r}",
+                    f"D{session.day} world.{k}: {old!r} -> {new!r}",
                 )
 
         newly_dead: list[str] = []

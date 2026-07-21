@@ -13,6 +13,7 @@ export function DuelPlayPanel({
 }) {
   const moves = encounter?.moves || [];
   const qiMax = Number(encounter?.qi_max || 0);
+  const maxHands = Number(encounter?.max_hands || 3);
   const serverPicked = encounter?.picked || [];
   const [picked, setPicked] = useState(serverPicked);
 
@@ -28,7 +29,7 @@ export function DuelPlayPanel({
   function addMove(moveId) {
     const m = byId[moveId];
     if (!m || loading) return;
-    if (picked.length >= 3) return;
+    if (picked.length >= maxHands) return;
     const cost = Number(m.qi_cost || 1);
     if (cost > remain) return;
     const next = [...picked, moveId];
@@ -52,7 +53,9 @@ export function DuelPlayPanel({
       {(encounter?.arts || []).length ? (
         <p className="sheet-copy muted">功法：{(encounter.arts || []).join("、")}</p>
       ) : null}
-      <p className="sheet-copy muted">点选小招排好次序（至多三手），再确定对拼。</p>
+      <p className="sheet-copy muted">
+        点选小招排好次序（至多{encounter?.max_hands || 3}手，耗气≤上限），再确定对拼。词条定棋盘，修为定砝码。
+      </p>
 
       <div className="duel-seq">
         <div className="duel-seq-label">本场次序</div>
@@ -82,7 +85,7 @@ export function DuelPlayPanel({
           {moves.map((m) => {
             const cost = Number(m.qi_cost || 1);
             const disabled =
-              loading || picked.length >= 3 || cost > remain;
+              loading || picked.length >= maxHands || cost > remain;
             return (
               <button
                 key={m.move_id}

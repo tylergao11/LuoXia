@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     evolve_max_npcs: int = 5
     # 上下文缓存命中日志（DeepSeek: prompt_cache_hit/miss_tokens）
     llm_cache_log: bool = True
+    # 教师轨迹落盘（供 Mini-LLM 蒸馏）；不改游戏权威状态
+    llm_trace_enabled: bool = True
+    # 空则默认 backend/data/llm_traces；可指到 C:/Ai/Mini-LLM/data/raw
+    llm_trace_dir: str = ""
 
     session_store: str = "sqlite"
     sqlite_path: str = str(_BACKEND_ROOT / "data" / "luoxia.db")

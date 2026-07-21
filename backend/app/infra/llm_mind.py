@@ -130,12 +130,14 @@ DIALOGUE_TURN_SYSTEM = """你同时完成两件事，且只输出一个 JSON：
   "events": [{"kind","severity","title","summary","actor_ids","location","known_to","card_headline","card_body","tags"}],
   "world_flag_ops": {},
   "game_flags": {},
-  "proclamation": null
+  "proclamation": null,
+  "ui_hints": {}
 }
 
 原则：
 - 对白贴人设，语气鲜活。
-- 有戏 → 至少 1 条 events + 必要 ops；平静寒暄 → events=[]。
+- 有戏 → 至少 1 条 events + 必要 ops；平静寒暄才可 events=[]。
+- 玩家约战/单挑/动手 → 必须 events；可 ui_hints.propose_encounter={"kind":"duel","foe_id":"<id>","reason":"..."}（引擎投影应战，禁止 world_flag_ops.active_encounter）。
 - known_to 体现信息差。闲聊 ap 约 1；摊牌/冲突可 2~3。
 - 整段回复就是上述 JSON；自洽第一，张力第二，通道选对。
 """
@@ -448,9 +450,13 @@ class LLMAgentMind(AgentMindPort):
         wfo = raw.get("world_flag_ops") or {}
         if not isinstance(wfo, dict):
             wfo = {}
+        else:
+            wfo = dict(wfo)
+            wfo.pop("active_encounter", None)
         proc = raw.get("proclamation")
         if proc is not None and not isinstance(proc, dict):
             proc = None
+        hints = raw.get("ui_hints") if isinstance(raw.get("ui_hints"), dict) else {}
 
         return AdjudicationResult(
             narrative_summary=str(raw.get("narrative_summary") or ""),
@@ -459,7 +465,7 @@ class LLMAgentMind(AgentMindPort):
             belief_ops=belief_ops,
             events=events,
             game_flags=dict(raw.get("game_flags") or {}),
-            world_flag_ops=dict(wfo),
-            ui_hints={},
+            world_flag_ops=wfo,
+            ui_hints=dict(hints),
             proclamation=proc,
         )

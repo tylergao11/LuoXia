@@ -91,11 +91,15 @@ def to_session_view(session: GameSession) -> SessionView:
             for b in session.beliefs.get(pid, [])
         ]
     clue_flags = list(extra.get("clue_flags") or [])
-    encounter = extra.get("encounter")
-    if encounter is None:
-        from app.core.services.encounter import project_encounter_view
+    from app.core.services.encounter import (
+        project_encounter_offer,
+        project_encounter_view,
+    )
 
-        encounter = project_encounter_view(session, pack) if pack is not None else None
+    encounter = extra.get("encounter")
+    if encounter is None and pack is not None:
+        encounter = project_encounter_view(session, pack)
+    encounter_offer = project_encounter_offer(session)
 
     path_labels: dict = {}
     if pack is not None:
@@ -162,4 +166,5 @@ def to_session_view(session: GameSession) -> SessionView:
         ),
         chat_by_actor=chat_log.export_store(session),
         encounter=encounter if isinstance(encounter, dict) else None,
+        encounter_offer=encounter_offer if isinstance(encounter_offer, dict) else None,
     )
